@@ -282,6 +282,9 @@ export class Renderer {
     this.eco = eco;
     this.time = 0;
     this.pointer = { x: 0, y: 0, active: 0 };
+    // コンテキストが生きているか。false になっている間は描かない（§6.4）
+    this.contextLost = false;
+    this.contextLostCount = 0;
 
     const p = eco.params;
     this.world = { x: p.worldX, y: p.worldY, z: p.worldZ };
@@ -313,6 +316,58 @@ export class Renderer {
     this._buildFish();
 
     this.resize();
+    this._bindContextEvents();
+  }
+
+  // ---------------------------------------------------------------
+  // WebGL コンテキストの消失と復帰（§6.4）
+  //
+  // iOS はメモリ逼迫やアプリ切替でコンテキストを容赦なく捨てる。捨てられたまま
+  // 描き続けると**エラーも出さずに黒い画面**になる。これが「一晩置いたら黒かった」の正体。
+  // ---------------------------------------------------------------
+  _bindContextEvents() {
+    const canvas = this.renderer.domElement;
+
+    canvas.addEventListener('webglcontextlost', (e) => {
+      // これを呼ばないと webglcontextrestored が来ない。
+      // three.js も自前のハンドラで呼んでいる（先に登録されているので実際はそちらが効く）が、
+      // 依存したくないので明示的に呼ぶ。二重に呼んでも害はない。
+      e.preventDefault();
+      this.contextLost = true;
+      this.contextLostCount++;
+    }, false);
+
+    canvas.addEventListener('webglcontextrestored', () => {
+      // three.js は initGLContext() で WebGLProperties と WebGLTextures を作り直すので、
+      // テクスチャとバッファは次の描画で自動的に再アップロードされる。
+      // ただし **WebGLBackground も作り直される**ため、setClearColor で入れた値は失われる。
+      // ここで入れ直さないと、消失前と後で背景の下端の色が変わる。
+      this.renderer.setClearColor(PALETTE.bgBottom, 1);
+      this.renderer.autoClear = false;
+      // ビューポートと pixelRatio も張り直す（state が作り直されているため）
+      this.resize();
+      this.contextLost = false;
+      this.forceCompositorRepaint();
+    }, false);
+  }
+
+  /**
+   * 合成レイヤーを作り直させる。
+   *
+   * iPad Safari が GPU タイルを描かず黒いまま／一部の帯だけ正しい色、という
+   * 事象が別プロジェクト（kana-practice, 2026-07）で実際に起きた。
+   * **`void el.offsetHeight` による reflow 強制は効かない**（レイヤーが再構築されないため）。
+   * display を none → '' に**同期的に**トグルするとレイヤーごと作り直される。
+   * 同一タスク内で戻すのでちらつかない。
+   *
+   * Safari 固有なので Chrome では黒を再現できない。ここは実機でしか最終確認できない。
+   */
+  forceCompositorRepaint() {
+    const el = this.renderer.domElement;
+    const prev = el.style.display;
+    el.style.display = 'none';
+    void el.offsetHeight; // 読み取ってスタイルの再計算を確定させる
+    el.style.display = prev || '';
   }
 
   // ---------------------------------------------------------------
@@ -827,6 +882,9 @@ export class Renderer {
   }
 
   render() {
+    // 死んだコンテキストには描かない。描いても黙って何も起きず、
+    // 「動いているのに黒い」という一番たちの悪い状態になる。
+    if (this.contextLost) return;
     this.renderer.clear();
     this.renderer.render(this.bgScene, this.bgCamera);
     this.renderer.clearDepth();
