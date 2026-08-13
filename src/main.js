@@ -9,6 +9,7 @@
 
 import { Ecosystem } from './ecosystem.js';
 import { Renderer } from './render.js';
+import { Diagnostics } from './diagnostics.js';
 
 const STEP = 1 / 30; // ecosystem は固定タイムステップでしか動かない（決定論性のため）
 
@@ -29,7 +30,10 @@ const stats = {
   wakeLockError: '',
   resumes: 0,          // バックグラウンドから戻った回数
 };
-window.__meguru = { eco, view, renderer: view.renderer, stats, STEP };
+// 診断表示（§8）。左上 15% を 2 秒以内に 3 回タップで開く
+const diag = new Diagnostics({ eco, view, stats });
+
+window.__meguru = { eco, view, renderer: view.renderer, stats, STEP, diag };
 
 // --- リサイズ ---
 function fit() {
@@ -138,6 +142,10 @@ function frame(now) {
   stats.frames++;
   stats.lastFrameMs = ms;
   if (ms > stats.worstFrameMs) stats.worstFrameMs = ms;
+
+  // 開いていなくても記録は続ける（1時間放置した後に開いても窓が埋まっているように）
+  diag.record(ms, now);
+  diag.update(false);
 
   fpsWindowFrames++;
   if (now - fpsWindowStart >= 1000) {
