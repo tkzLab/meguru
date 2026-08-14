@@ -119,6 +119,8 @@ const CONF = {
   fishCargoSpread: 0.34,
 
   fishScale: 0.85,
+  fishLength: 2.10,   // 板の長さ（旧 ShapeGeometry の全長と同じ）
+  fishOpacity: 0.78,  // 縁をぼかしたぶん芯は少し濃くしないと影が薄くなる
 
   fogDensity: 0.016,
 };
@@ -249,6 +251,102 @@ function makePetalTexture(size) {
   ctx.globalCompositeOperation = 'source-over';
 
   const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// ---------------------------------------------------------------
+// 魚のシルエット。**アルファだけを作る**（色はマテリアルの color で着ける）。
+//
+// 公開後に「黒い花びらのようなものが出る」と指摘を受けた箇所。以前は
+// ShapeGeometry で輪郭そのものを三角形にしていたため、(1) 分割数が粗く曲線が
+// 折れ線になり (2) 縁がぴたりと立ち (3) 尾が割れておらずレンズ形だったので、
+// 魚ではなく「黒い木の葉」に見えていた。**原因は 3 つともこのテクスチャ側**で、
+// 深度やブレンドの設定は無関係だったことを canary との画素比較で確認している。
+//
+// ぼかしに `ctx.filter = 'blur()'` は使わない。iOS Safari は対応が遅く、
+// 効かない環境では**縁が立ったまま**＝直したはずの不具合がそのまま出る。
+// 太さを変えたストロークを重ねて手で階段を作れば、どこでも同じ絵になる。
+// ---------------------------------------------------------------
+const FISH_TEX_W = 256;
+const FISH_TEX_H = 128;
+// 縁のぼかしの強さ。大きいほど柔らかい（テクスチャをこの割合まで縮めてから戻す）
+const BLUR_DIV = 8;
+
+function makeFishTexture(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+
+  // 正規化座標（左＝尾、右＝頭、y は上が 0）で形を決める
+  const X = (t) => t * w;
+  const Y = (t) => t * h;
+
+  // --- 胴と尾。尾は割る（レンズ形に見えていた最大の原因） ---
+  const body = new Path2D();
+  body.moveTo(X(0.96), Y(0.50));                                   // 口先
+  body.quadraticCurveTo(X(0.78), Y(0.29), X(0.52), Y(0.31));       // 背
+  body.quadraticCurveTo(X(0.40), Y(0.33), X(0.31), Y(0.41));       // 尾の付け根へ絞る
+  body.lineTo(X(0.05), Y(0.15));                                   // 尾びれ上の先
+  body.quadraticCurveTo(X(0.17), Y(0.50), X(0.05), Y(0.85));       // 尾の切れ込み
+  body.lineTo(X(0.31), Y(0.59));
+  body.quadraticCurveTo(X(0.40), Y(0.67), X(0.52), Y(0.69));       // 腹
+  body.quadraticCurveTo(X(0.78), Y(0.71), X(0.96), Y(0.50));
+  body.closePath();
+
+  // --- ひれ。胴より薄くして、透ける膜に見せる ---
+  const fins = new Path2D();
+  fins.moveTo(X(0.60), Y(0.30));                                   // 背びれ
+  fins.quadraticCurveTo(X(0.52), Y(0.10), X(0.40), Y(0.30));
+  fins.closePath();
+  fins.moveTo(X(0.66), Y(0.66));                                   // 胸びれ
+  fins.quadraticCurveTo(X(0.62), Y(0.86), X(0.50), Y(0.70));
+  fins.closePath();
+
+  // --- いったん輪郭どおりに塗る ---
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';  // ひれは薄く＝透ける膜に見せる
+  ctx.fill(fins);
+  ctx.fillStyle = 'rgba(255,255,255,1)';
+  ctx.fill(body);
+
+  // --- 縁をぼかす ---
+  //
+  // 幅を変えたストロークを重ねる方法では駄目だった。**外側に薄い裾は付くが、
+  // 芯の塗りの境目でアルファが 0.1 → 1.0 に跳ねるので、縁は立ったまま**になる
+  // （実測で 10%→90% が 1px。直したつもりで直っていなかった）。
+  // 一度小さく描いてから引き伸ばすと、拡大時の線形補間が本物の階段を作る。
+  // `ctx.filter='blur()'` に頼らないので iOS Safari でも同じ絵になる。
+  const bw = Math.max(8, Math.round(w / BLUR_DIV));
+  const bh = Math.max(8, Math.round(h / BLUR_DIV));
+  const small = document.createElement('canvas');
+  small.width = bw;
+  small.height = bh;
+  const sctx = small.getContext('2d');
+  sctx.imageSmoothingEnabled = true;
+  sctx.drawImage(c, 0, 0, bw, bh);
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(small, 0, 0, w, h);
+  // 芯が薄くなりすぎるので、同じものをもう一度重ねて中心だけ濃くする。
+  // 加算ではなく通常合成なので、1.0 に達した芯はそれ以上濃くならず、
+  // 裾だけが少し持ち上がる（縁の階段は残る）。
+  ctx.drawImage(small, 0, 0, w, h);
+
+  const tex = new THREE.CanvasTexture(c);
+  // **ここは光の粒と方針が逆で、ミップを作る。**
+  // 光の粒は半径の 8% しかない芯がミップの平均で消えるので切っていたが、
+  // 魚は大きく滑らかなシルエットで、失って困る細部が無い。
+  // 画面上は 50〜90px しかないのに 256px のテクスチャを貼るため強い縮小になり、
+  // ミップが無いと縁が飛び飛びに標本化されて**ぼかしたはずの階段が消える**うえ、
+  // 泳いで動く分だけちらつく（1時間眺める作品では致命的）。
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
   tex.needsUpdate = true;
   return tex;
 }
@@ -686,32 +784,40 @@ export class Renderer {
   // 魚：光らない暗いシルエット。板1枚を進行方向へ向ける
   // ---------------------------------------------------------------
   _buildFish() {
-    const shape = new THREE.Shape();
-    shape.moveTo(-1.15, 0.0);      // 尾の先
-    shape.lineTo(-0.72, 0.34);
-    shape.quadraticCurveTo(-0.2, 0.44, 0.42, 0.2);
-    shape.quadraticCurveTo(0.86, 0.06, 0.95, 0.0);
-    shape.quadraticCurveTo(0.86, -0.06, 0.42, -0.2);
-    shape.quadraticCurveTo(-0.2, -0.44, -0.72, -0.34);
-    shape.closePath();
-
-    const geo = new THREE.ShapeGeometry(shape, 8);
+    // 板 1 枚 ＋ アルファのテクスチャで作る。以前は ShapeGeometry で輪郭そのものを
+    // 三角形に分割していたが、分割数が粗く曲線が折れ線として見えた。
+    // テクスチャなら曲線は canvas が描くので、どこまで寄っても折れない。
+    // 板の寸法はテクスチャの縦横比から出す（全長を指定し、丈は比で決める）。
+    // ここで全長を掛けたうえに fishScale も掛けると二重に効くので注意
+    const len = CONF.fishLength;
+    const geo = new THREE.PlaneGeometry(len, (len * FISH_TEX_H) / FISH_TEX_W);
     geo.rotateY(-Math.PI / 2); // ローカル +X（進行方向）を +Z に合わせ、lookAt を使えるようにする
     geo.scale(CONF.fishScale, CONF.fishScale, CONF.fishScale);
 
     const mat = new THREE.MeshBasicMaterial({
       color: PALETTE.fish,
+      map: makeFishTexture(FISH_TEX_W, FISH_TEX_H),
       transparent: true,
-      opacity: 0.72,
+      opacity: CONF.fishOpacity,
       side: THREE.DoubleSide,
       fog: true,          // 遠い魚は水に溶ける
-      depthWrite: true,   // 光を遮ってシルエットになる
+      // 半透明なので深度は書かない。
+      // **これが「黒い切り抜き」の原因ではない。** 当初そう説明したが、
+      // depthWrite を true に戻した canary と画素単位で比較したところ
+      // 差は 0 画素だった（光の粒も花も depthWrite を切っているため、
+      // この場面では深度テストに落ちるものが無い）。原因はすべてテクスチャ側。
+      // それでも false にしておくのは、半透明の描画順に結果を依存させないため。
+      depthWrite: false,
     });
 
     this.fishMeshes = [];
     for (let i = 0; i < this.eco.fishes.length; i++) {
       const m = new THREE.Mesh(geo, mat);
       m.frustumCulled = false;
+      // 光より後に描く。実測ではこれを外しても絵は変わらなかった（差 0 画素）が、
+      // three.js の半透明ソートは物体の中心距離で決まるため、魚が動けば順序も動く。
+      // 明示しておけば「たまたま今は正しい」状態に依存しない。
+      m.renderOrder = 5;
       this.scene.add(m);
       this.fishMeshes.push(m);
     }
