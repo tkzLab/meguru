@@ -44,12 +44,26 @@ const CONF = {
   focusPeriodSec: 47,  // ピント面の往復周期。120 と揃えないことで長時間反復しない
 
   /**
-   * 点の大きさは「基準距離での画素数」で指定する。
-   * gl_PointSize = basePx * scale * pixelRatio * (refDist / depth)
+   * 点の大きさは「基準の画面で、基準距離に置いたときの画素数」で指定する。
+   * gl_PointSize = basePx * scale * sizeScale * (refDist / depth)
+   *   sizeScale = 描画バッファの高さ / refBufferHeight
    * 以前は素の定数を深度で割っていたため、実距離では 0.76px になり
    * サブピクセルで消えていた（実測）。基準距離を明示すると見積もりを間違えない。
+   *
+   * **sizeScale を pixelRatio にしていたのが iPhone の白飛びの原因だった。**
+   * 花・魚・世界の見かけの大きさは「バッファの高さ」に比例して縮むのに、
+   * 粒だけが pixelRatio にしか比例しないので、画面が縦に短いほど粒だけが
+   * 相対的に肥大する。加算合成なので重なりが増えたぶん超線形に明るくなる。
+   * 実測（基準距離の粒がバッファ高の何%か）:
+   *   Mac 1536x1024   3.76%   輝度70以上  6.7〜9.8%  白飛び 0.01%
+   *   iPad 1024x768@2 5.01%   〃         10.0〜15.2% 〃    0.11%
+   *   iPhone 縦       5.14%   〃         11.6〜21.4% 〃    0.05%
+   *   iPhone 横       12.03%  〃         16.4〜19.8% 〃    3.20%（予算の3200倍）
+   * バッファ高に比例させれば、どの画面でも 3.76% で一定になる。
    */
   refDist: 48,
+  // §11.3 の明るさ予算を実測した画面の高さ（描画バッファの画素）
+  refBufferHeight: 1024,
 
   // 擬似被写界深度（ポストプロセスなし。点シェーダ内で処理する）
   focusNear: 30,
@@ -729,13 +743,13 @@ export class Renderer {
         uBlurSize: { value: CONF.blurSizeGain },
         uBlurDim: { value: CONF.blurDimGain },
         uFogDensity: { value: CONF.fogDensity },
-        uPixelRatio: { value: 1 },
+        uSizeScale: { value: 1 },
         uGain: { value: CONF.lightGain },
       },
       vertexShader: `
         attribute float aWarm;
         attribute float aScale;
-        uniform float uSize, uRefDist, uFocus, uFocusRange, uBlurSize, uBlurDim, uPixelRatio, uFogDensity;
+        uniform float uSize, uRefDist, uFocus, uFocusRange, uBlurSize, uBlurDim, uSizeScale, uFogDensity;
         varying float vWarm;
         varying float vDim;
         void main() {
@@ -750,7 +764,7 @@ export class Renderer {
           float blur = clamp(abs(depth - uFocus) / uFocusRange, 0.0, 1.0);
 
           // 「基準距離での画素数」で指定する（CONF.refDist のコメント参照）
-          gl_PointSize = uSize * aScale * uPixelRatio * (1.0 + blur * uBlurSize) * uRefDist / max(depth, 1.0);
+          gl_PointSize = uSize * aScale * uSizeScale * (1.0 + blur * uBlurSize) * uRefDist / max(depth, 1.0);
 
           float fog = exp(-uFogDensity * uFogDensity * depth * depth);
           vDim = fog / (1.0 + blur * uBlurDim);
@@ -824,14 +838,14 @@ export class Renderer {
         uSize: { value: CONF.moteSize },
         uRefDist: { value: CONF.refDist },
         uOpacity: { value: CONF.moteOpacity },
-        uPixelRatio: { value: 1 },
+        uSizeScale: { value: 1 },
         uFogDensity: { value: CONF.fogDensity },
         uPointer: { value: new THREE.Vector2(0, 0) },
       },
       vertexShader: `
         attribute float aPhase;
         attribute float aScale;
-        uniform float uTime, uSize, uRefDist, uPixelRatio, uFogDensity;
+        uniform float uTime, uSize, uRefDist, uSizeScale, uFogDensity;
         uniform vec2 uPointer;
         varying float vDim;
         varying float vWarm;
@@ -848,7 +862,9 @@ export class Renderer {
 
           vec4 mv = modelViewMatrix * vec4(p, 1.0);
           float depth = -mv.z;
-          gl_PointSize = uSize * aScale * uPixelRatio * uRefDist / max(depth, 1.0);
+          // 微粒子は元々 2.4px しかないので、小さい画面では 1px を割ってちらつく。
+          // 空気を作るための背景なので、下限だけ設けて消えないようにする
+          gl_PointSize = max(uSize * aScale * uSizeScale * uRefDist / max(depth, 1.0), 1.3);
           float fog = exp(-uFogDensity * uFogDensity * depth * depth);
           vDim = fog;
           vWarm = step(0.72, fract(aPhase * 3.17));
@@ -1035,9 +1051,14 @@ export class Renderer {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    // 粒の大きさは「描画バッファの高さ」に比例させる（CONF.refDist のコメント参照）。
+    // 世界の見かけの大きさは縦画角で決まるのでバッファ高に比例する。粒だけを
+    // pixelRatio に比例させると、画面が縦に短いほど粒が相対的に肥大し、
+    // 加算合成で超線形に明るくなる（iPhone 横向きで白飛び 3.2%）。
     const pr = this.renderer.getPixelRatio();
-    this.lightMat.uniforms.uPixelRatio.value = pr;
-    this.moteMat.uniforms.uPixelRatio.value = pr;
+    const scale = (h * pr) / CONF.refBufferHeight;
+    this.lightMat.uniforms.uSizeScale.value = scale;
+    this.moteMat.uniforms.uSizeScale.value = scale;
   }
 
   /** ecosystem を1ステップ進めたあとに呼ぶ。dt は固定 1/30。 */
