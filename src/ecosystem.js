@@ -51,15 +51,25 @@ export const DEFAULT_PARAMS = {
   //   - 魚が巡航高度で落とした光は樹冠まで降ってくる（魚の落とした光は沈む）
   // 中立点を水柱の中ほど（y=12）に置くと、光が花の吸収半径の外に溜まり循環が止まる。
   buoyancy: 0.15,
+  // 釣り合う高さの散らばり（0 だと全部が同じ高さの面に集まる）
+  buoyancySpread: 7.0,
   buoyancyNeutralY: 2.4,
   buoyancyCoupling: 1.5,
 
   // 花
   flowerInitial: 10,
-  flowerMin: 8,
-  flowerMax: 24,
+  // 花は「数で埋める」のではなく「一輪が巨大な生命体」として在る。
+  // 数を減らすと、有限な 300 個の光が一輪により多く集まり、
+  // 「内部に光を抱えている」が新しい光を作らずに成立する（design.md §8.4）。
+  flowerMin: 5,
+  flowerMax: 13,
   flowerY: 2, // 海底の巨大な花。樹冠の高さに光の層が来るようにする
-  flowerAbsorbRadius: 2.2,
+  // 吸収は「器の口のあたり」で起きる。**花の見た目を大きくしたら必ずここも見直す。**
+  // 器を 1.62 倍にしたとき、ここだけ元のままだったので、
+  // 描かれている器の口（y≈5）より内側の小さな球でしか吸収せず、
+  // 鉛直に広がった光が一切届かなくなった（循環が止まり②が赤になった）
+  flowerAbsorbRadius: 3.8,
+  flowerMouthY: 2.6,   // 花の根元から器の口までの高さ
   flowerAbsorbInterval: 0.55,
   flowerCapacity: 14,
   flowerDeathSec: 45,
@@ -111,6 +121,15 @@ export class Ecosystem {
     this._vel = new Float32Array(N * 3);
     this._driftCount = 0;
 
+    // 釣り合う高さの個体差。**スロット番号から決める**（乱数を引かない）ので、
+    // 同じ seed なら同じ層構造になり、swap-remove で並びが変わっても
+    // 「その位置の光」の性質は変わらない。
+    this._neutralOffset = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const h = (Math.abs(Math.sin(i * 12.9898 + 4.1)) * 43758.5453) % 1;
+      this._neutralOffset[i] = h * p.buoyancySpread;
+    }
+
     // --- 花（固定容量。swap-remove で出し入れする） ---
     this._flowers = [];
     for (let i = 0; i < p.flowerMax; i++) {
@@ -151,8 +170,12 @@ export class Ecosystem {
     const hx = p.worldX / 2;
     const hz = p.worldZ / 2;
 
-    // 花を床にばらまく
-    for (let i = 0; i < p.flowerInitial; i++) {
+    // 花を床にばらまく。
+    // **上限で頭打ちにする。** 器の配列は flowerMax 個しか無いので、
+    // flowerInitial のほうが大きいと配列の外に書き込んで静かに壊れる
+    // （flowerMax を 24 → 13 に下げたときに、パラメータ掃引のテストが検出した）。
+    const initial = Math.min(p.flowerInitial, p.flowerMax);
+    for (let i = 0; i < initial; i++) {
       const f = this._flowers[this._flowerCount++];
       f.x = (r() * 2 - 1) * hx * 0.85;
       f.z = (r() * 2 - 1) * hz * 0.85;
@@ -251,8 +274,15 @@ export class Ecosystem {
       vel[o] += (cx - vel[o]) * k;
       vel[o + 2] += (cz - vel[o + 2]) * k;
 
-      // 鉛直：y=buoyancyNeutralY で釣り合う対流。上に行き過ぎた光は沈んで戻る
-      const term = p.buoyancy * (1 - pos[o + 1] / p.buoyancyNeutralY);
+      // 鉛直：釣り合う高さで対流が止まる。上に行き過ぎた光は沈んで戻る。
+      //
+      // **釣り合う高さを 1 つにしてはいけない。** 単一の安定平衡なので、
+      // 時間が経つと全部がその高さの面に集まる。実測では漂う光の半分以上が
+      // y=2.40 ちょうどに張り付き、画面では横一列の帯になった（§4 が避けたかった
+      // 「均衡に落ちる」が、水平ではなく鉛直で起きていた）。
+      // 粒ごとに釣り合う高さを散らすと、同じ仕組みのまま厚みのある層になる。
+      const neutral = p.buoyancyNeutralY + this._neutralOffset[i];
+      const term = p.buoyancy * (1 - pos[o + 1] / neutral);
       vel[o + 1] += (term - vel[o + 1]) * bk;
 
       if (jitter > 0) {
@@ -294,7 +324,7 @@ export class Ecosystem {
       for (let i = 0; i < this._driftCount; i++) {
         const o = i * 3;
         const dx = pos[o] - f.x;
-        const dy = pos[o + 1] - f.y;
+        const dy = pos[o + 1] - (f.y + p.flowerMouthY);
         const dz = pos[o + 2] - f.z;
         const d = dx * dx + dy * dy + dz * dz;
         if (d < bestD) { bestD = d; best = i; }

@@ -147,7 +147,7 @@ test('① パラメータを変えても総数は保存される（構造的不�
 // ② 絶滅も飽和もしない
 // =====================================================================
 
-test('② 10分間、花の数が下限8〜上限24 の範囲内に留まる', () => {
+test('② 10分間、花の数が DEFAULT_PARAMS の下限〜上限に留まる', () => {
   const r = run(TEN_MIN, { seed: 1 });
   assert.ok(
     r.minFlowers >= DEFAULT_PARAMS.flowerMin,
@@ -204,7 +204,11 @@ test('canary1: 花の消滅ガードを外すと ① が破れる', () => {
   // その領域では「下限に阻まれて消滅できなかった花」が、その後に光を受け取り、
   // 蓄えを持ったまま寿命に達する。ガードが実際に仕事をするのはこの状態。
   // （既定パラメータでは花が上限に張り付くのでこの状態が起きない = ガードは休眠している）
-  const params = { flowerDeathSec: 8, seedCount: 20 };
+  // ガードが仕事をするのは「空腹で寿命に達した花が、その瞬間に光を持っている」時だけ。
+  // 器を大きくして吸収範囲を広げたら花がよく育つようになり、
+  // そもそも寿命に達しなくなってガードが休眠した（＝canary が緑になった）。
+  // 吸収を遅く・寿命を短くして、飢えたまま稀に光を拾う領域に戻す。
+  const params = { flowerAbsorbInterval: 6, flowerDeathSec: 15, flowerMin: 1 };
   const broken = run(36000, { seed: 1, params: { ...params, enforceFlowerChargeGuard: false } });
 
   assert.notEqual(

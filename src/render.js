@@ -54,12 +54,19 @@ const CONF = {
   // 擬似被写界深度（ポストプロセスなし。点シェーダ内で処理する）
   focusNear: 30,
   focusFar: 66,
-  focusRange: 18,      // これだけ焦点から離れると最大にボケる
+  // これだけ焦点から離れると最大にボケる（§11.6 の実測値）。
+  // 27 に広げると明るさが増えると読んだが、実測は逆で暗くなった（0.091→0.060%）。
+  // ボケの半径が小さくなるぶん、粒どうしの裾が重ならなくなるためと考えられる。
+  // 推測で動かさず実測値に戻す
+  focusRange: 18,
   // 接写ムードボードでは、ボケ玉は半値直径 80px（鋭い粒の約20倍）まで広がるのに
   // 芯の輝度は 174〜192（鋭い粒 201）でほとんど落ちない。
   // ＝「大きく広がるが、あまり暗くならない」。旧値（2.2 / 3.4）は逆に寄っていた。
   blurSizeGain: 3.2,
-  blurDimGain: 1.9,
+  // ボケた粒の減光。強すぎると、焦点が光の層から外れる時刻に芯が
+  // §11.3 の下限（輝度200以上 0.1%）を割る（t=90s で 0.082%）。
+  // 全体の明るさを上げると白飛びが増えるので、ここだけを緩める
+  blurDimGain: 1.62,
 
   /**
    * 意味のある光（保存量 300 個）。
@@ -69,7 +76,10 @@ const CONF = {
    * その中のごく小さな芯だけが明るい、という構成にする必要がある。
    * これは実測どおりでもある（半値半径 1.91px に対しスプライト半径 24px）。
    */
-  lightSize: 42.0,
+  // 42.0 は接写の実測（芯の半径比 8%）から決めた値。比は falloff.js が持つので、
+  // ここは裾の広さだけを決める。器に光が集まって裾が重なるようになったぶん、
+  // 輝度70以上の面積が上限 10% に触れたので少し縮める
+  lightSize: 38.5,
   lightWarmBoost: 1.30,  // 暖色は少しだけ大きく。明るさは「芯が密に重なること」で作る
   /**
    * 1粒あたりの明るさ。1.0 だと芯が白飛びする。
@@ -92,20 +102,58 @@ const CONF = {
    * 以後「輝度200以上の量」は暖色の粒の**個数**に追従する ＝ 保存量に追従する。
    * これ以上（1.10）上げると霧の薄い手前で 255 を超えて白飛びする。
    */
-  lightGain: 1.02,
+  // 1.02 は「芯が重なって白飛びする」時代の値。光粒を器の中で重ねずに散らしたので
+  // 白飛びは 0.060% → 0.001% に下がり、上げる余裕ができた。
+  // 上げる理由は、重なりが隠していた「ボケた時刻に芯が 200 を割る」が露出したため
+  // （焦点周期 47 秒に同期して 0.520% ⇔ 0.053% と振れる）
+  lightGain: 1.32,
 
   // 環境の微粒子（保存則の外。空気を作るためだけに在る）: 基準距離で 1.8px
   moteCount: 12000,
   moteSize: 2.4,
   moteOpacity: 1.0,
 
-  // 花：小さく・薄く。主役は花そのものではなく、花が抱えている光
-  flowerScale: 1.15,
-  flowerOpacity: 0.40,      // 膜の実測（水より +20〜26 輝度）から逆算した値。§11.8
-  // 蓄えた光は等方に散らさず、椀の底から放射状に伸びる糸の先に載せる（§11.8）
-  flowerLightSpread: 2.45,  // 糸の最大の長さ（花の大きさに比例させる）
-  flowerLightBase: 0.30,    // 椀の底からの立ち上がり
-  flowerLightArc: 0.28,     // 外へ行くほど持ち上がる量（糸の反り）
+  // 花：主役は花そのものではなく、花が抱えている光。
+  // 膜は「光が無ければ形が辛うじて分かる」程度にとどめる（§11.8 の実測が上限）
+  // 数を 24 → 13 に減らしたぶん、一輪を大きくする（仕様「巨大な生命体」）。
+  // 遠景では淡い光、中景で輪郭、近景で膜と光粒、という階層を作るための土台
+  flowerScale: 1.62,
+
+  /* --- 器の形（深海の花とクラゲの中間） --- */
+  flowerPetals: 7,          // 花びらの枚数
+  flowerLength: 2.35,       // 中心から花びらの先までの長さ
+  flowerWidth: 1.12,        // 花びらの最大の半幅。
+                            // 広すぎると 7 枚が溶けて一枚の霞になり、
+                            // 狭すぎると長いリボンに見える（器を大きくしたら要見直し）
+  flowerDepth: 1.95,        // 器の深さ（中心の窪み。大きいほど深い器）
+  flowerWaveU: 0.20,        // 長さ方向のうねり
+  flowerWaveV: 0.16,        // 幅方向のうねり（膜が横に波打つ）
+  flowerAsym: 0.20,         // 枚ごとの角度・長さ・幅のばらつき（左右対称にしない）
+  // 分割数。少ないと折れ線になり「硬い板」に見える。
+  // **照明を頂点ごとに計算しているので、ここが粗いと三角形の面が直線として出る**
+  // （実際に出た。器の下側に階段状の直線が走った）
+  flowerSegU: 16,
+  flowerSegV: 10,
+
+  /* --- 膜の見え方 --- */
+  flowerAlpha: 0.42,        // 膜そのものの不透明度。上げると光を遮って暗くなる
+  flowerBodyLit: 0.16,      // 光が無くても見える最低限の明るさ（形の輪郭）
+  flowerGlowGain: 0.30,     // 光粒 1 個が膜を照らす強さ
+  flowerLightFalloff: 2.6,  // 光粒からの距離の効き。大きいほど照らす範囲が狭い
+
+  /* --- 揺らぎ（植物ではなくクラゲの膜） --- */
+  flowerSwayAmp: 0.16,
+  flowerSwaySpeed: 0.42,    // rad/s。非常にゆっくり
+
+  /* --- 器の中に浮かぶ光粒（保存量の一部。新しくは作らない） --- */
+  flowerLightRadius: 0.62,  // 器の内側のどこまで散らばるか（花の長さに対する比）
+  // 大きいほど中心に密集する。**大きすぎると「密集」ではなく「重なり」になる。**
+  // 2.0 では最初の 5 個が半径 0.15 以内に積み上がり、芯が重なって白飛びした
+  // （完全な白飛び 0.060%。ムードボードは 0.001%）。
+  // 0.5 が面積あたり均等。それより大きければ中心寄りになる
+  flowerLightBias: 0.85,
+  flowerLightLift: 0.16,    // 器の面からどれだけ浮くか
+  flowerLightBob: 0.09,     // ゆっくりした上下の漂い
 
   /**
    * 魚が運ぶ光の散らばり。
@@ -161,98 +209,196 @@ function makeGlowTexture(size, coreRatio) {
   return tex;
 }
 
+
 /**
- * 花弁のテクスチャ。uv(0,0)=根元の左、uv(1,1)=先端の右。
+ * 器の中に光粒が座る位置の表（花のローカル座標）。
  *
- * 接写ムードボードの実測（design.md §11.8）から作り直したもの。以前は
- * 「うっすら均一に明るい膜＋ごく弱い筋7本」だったが、実測はその逆だった：
+ * **CPU（粒そのものの描画）と GPU（膜がどこで明るくなるか）で同じ表を使う。**
+ * 別々に計算すると、光っている場所と粒の場所がずれて「内側から照らされている」
+ * ように見えなくなる。ここが一致していることが、この表現の土台になる。
  *
- *   膜   … 水より +20〜26 輝度・色相 197°・**R 成分がほぼゼロ**（漂う光と同じ寒色）
- *   葉脈 … 膜の中の輝度の振れ幅が 12〜25。膜の中央値 26〜32 と**同等以上**
- *   リム … 膜の 3〜4 倍（膜側 41 → 縁 107）。ただし**全周ではなく光を受けた側だけ**
- *
- * つまり「ごく暗い膜 ＋ はっきり明るい葉脈 ＋ 片側だけ強い縁」。
- * 以前の実装は膜が明るすぎ・葉脈が弱すぎで、遠目に「薄い弧」に見えていた。
+ * 中心ほど密（半径に指数を掛ける）。角度は黄金角で回して規則的な輪を避ける。
  */
-function makePetalTexture(size) {
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const ctx = c.getContext('2d');
-  ctx.clearRect(0, 0, size, size);
-  const cx = size / 2;
-
-  // 花弁の輪郭（下＝根元、上＝先端）。縁を波打たせて膜らしさを出す
-  const petal = new Path2D();
-  petal.moveTo(cx, size * 0.99);
-  petal.bezierCurveTo(cx - size * 0.30, size * 0.74, cx - size * 0.36, size * 0.34, cx - size * 0.06, size * 0.03);
-  petal.bezierCurveTo(cx + size * 0.16, size * 0.10, cx + size * 0.36, size * 0.36, cx + size * 0.30, size * 0.72);
-  petal.closePath();
-
-  // --- 膜：暗い寒色。R をほぼ持たせない（実測 rgb 差 (0〜6, 24〜32, 33〜48)） ---
-  const g = ctx.createLinearGradient(0, size, 0, 0);
-  g.addColorStop(0.00, 'rgba(18,148,220,0.42)');
-  g.addColorStop(0.35, 'rgba(18,148,220,0.30)');
-  g.addColorStop(0.78, 'rgba(16,140,214,0.15)');
-  g.addColorStop(1.00, 'rgba(16,140,214,0.00)');
-  ctx.fillStyle = g;
-  ctx.fill(petal);
-
-  ctx.save();
-  ctx.clip(petal);
-  // ここから先は加算で重ねる。実際の描画も加算合成なので、テクスチャ内でも
-  // 同じ足し方にしておくと「膜の何倍」という実測比をそのまま作れる。
-  ctx.globalCompositeOperation = 'lighter';
-
-  // --- 葉脈：根元から扇状に広がる細い筋 ---
-  //
-  // 実測のコントラストは膜と同等以上だったが、**その値をそのまま使うと破綻する**。
-  // 実測は花が画面いっぱいに写った接写のもので、こちらは 1 輪が 30px 程度しかない。
-  // 葉脈を先端まで直線で通すと、遠目には花ではなく「放射状の光条」に見えた
-  // （実際に一度そうなった）。筋は先端まで届かせず、中ほどで消す。
-  const veins = 15;
-  ctx.lineCap = 'round';
-  for (let i = 0; i < veins; i++) {
-    const t = (i / (veins - 1)) * 2 - 1;             // -1..1
-    const spread = t * 0.26;
-    const tipY = size * (0.40 + Math.abs(t) * 0.22); // 先端まで届かせない
-    const a = 0.17 * (1 - Math.abs(t) * 0.6);
-    ctx.strokeStyle = `rgba(120,205,255,${a.toFixed(3)})`;
-    ctx.lineWidth = Math.max(0.8, size / 170) * (1 - Math.abs(t) * 0.35);
-    ctx.beginPath();
-    ctx.moveTo(cx, size * 0.95);
-    ctx.quadraticCurveTo(cx + spread * size * 0.5, size * 0.68, cx + spread * size * 0.82, tipY);
-    ctx.stroke();
+function makeFlowerSlots(n) {
+  const slots = new Float32Array(n * 3);
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  for (let k = 0; k < n; k++) {
+    const q = (k + 0.5) / n;
+    const r = CONF.flowerLength * CONF.flowerLightRadius * Math.pow(q, CONF.flowerLightBias);
+    const th = k * golden;
+    const u = Math.min(1, r / CONF.flowerLength);
+    // 器の断面（_buildFlowers と同じ式）に載せ、そこから少し浮かせる。
+    // 高さに個体差を付けないと、光が一枚の面に貼り付いて奥行きが消える
+    const lift = CONF.flowerLightLift * (0.55 + ((k * 7) % 5) / 5);
+    slots[k * 3] = Math.cos(th) * r;
+    slots[k * 3 + 1] = CONF.flowerDepth * Math.pow(u, 1.7) + lift;
+    slots[k * 3 + 2] = Math.sin(th) * r;
   }
+  return slots;
+}
 
-  // --- 縁のリム：片側だけ。strokeStyle に勾配を入れて安く済ませる ---
-  // 接写の実測は膜の 3〜4 倍だが、ここでもそのままは使えない。
-  // 花弁の輪郭を明るくなぞると、遠目には輪郭線だけが残って板に見える。
-  const rim = ctx.createLinearGradient(0, size, size, 0);
-  rim.addColorStop(0.00, 'rgba(205,238,255,0.00)');
-  rim.addColorStop(0.50, 'rgba(215,242,255,0.10)');
-  rim.addColorStop(0.85, 'rgba(228,248,255,0.26)');
-  rim.addColorStop(1.00, 'rgba(235,250,255,0.32)');
-  ctx.strokeStyle = rim;
-  ctx.lineWidth = Math.max(1.4, size / 80);
-  ctx.stroke(petal);
-  ctx.restore();
+/**
+ * 花びら（膜）のマテリアル。
+ *
+ * **加算合成をやめた。** 加算は「花びら自身が光っている」ことにしかならず、
+ * 仕様の「花びらそのものを発光させない」と正面から矛盾する。
+ * 代わりに **プリマルチプライド合成**（`ONE, ONE_MINUS_SRC_ALPHA`）にして、
+ * 1 枚の膜に 2 つの役目を同時に持たせる：
+ *
+ *   - `alpha` の分だけ後ろを**遮る**（膜としての厚み。器の奥は暗くなる）
+ *   - `rgb` の分だけ**足す**（内部の光を膜が散乱して淡く光って見える分）
+ *
+ * 散乱の量は「その花が今いくつ光を抱えているか」だけで決まる。
+ * 花は自分では光らず、**光粒がいなくなれば形の輪郭だけが残る**。
+ */
+function makePetalMaterial(slots, capacity) {
+  return new THREE.ShaderMaterial({
+    defines: { CAPACITY: capacity },
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.NormalBlending,
+    premultipliedAlpha: true,
+    uniforms: {
+      uTime: { value: 0 },
+      uTint: { value: new THREE.Color(PALETTE.cool).multiplyScalar(0.42) },
+      uGlowCool: { value: new THREE.Color(PALETTE.cool) },
+      uGlowWarm: { value: new THREE.Color(PALETTE.warm) },
+      uAlpha: { value: CONF.flowerAlpha },
+      uBodyLit: { value: CONF.flowerBodyLit },
+      uGlowGain: { value: CONF.flowerGlowGain },
+      uSlots: { value: slots },
+      uLightFall: { value: CONF.flowerLightFalloff },
+      uSwayAmp: { value: CONF.flowerSwayAmp },
+      uSwaySpeed: { value: CONF.flowerSwaySpeed },
+      uFogColor: { value: new THREE.Color(PALETTE.bgTop) },
+      uFogDensity: { value: CONF.fogDensity },
+    },
+    vertexShader: /* glsl */ `
+      attribute float aU;
+      attribute float aV;
+      attribute float aPh;
+      uniform float uTime;
+      uniform float uSwayAmp;
+      uniform float uSwaySpeed;
+      uniform vec3 uSlots[CAPACITY];
+      uniform float uLightFall;
+      varying float vU;
+      varying float vV;
+      varying float vCharge;
+      varying float vDepth;
+      varying float vLit;
+      varying float vNdv;
 
-  // --- 輪郭をぼかす ---
-  // clip で切ると縁がぴたりと立ち、8 枚の板が「羽根」に見えてしまう。
-  // アルファに放射状の減衰を掛けて、外へ行くほど溶けるようにする。
-  ctx.globalCompositeOperation = 'destination-in';
-  const soft = ctx.createRadialGradient(cx, size * 0.66, size * 0.06, cx, size * 0.66, size * 0.56);
-  soft.addColorStop(0.00, 'rgba(0,0,0,1)');
-  soft.addColorStop(0.55, 'rgba(0,0,0,0.88)');
-  soft.addColorStop(0.82, 'rgba(0,0,0,0.42)');
-  soft.addColorStop(1.00, 'rgba(0,0,0,0)');
-  ctx.fillStyle = soft;
-  ctx.fillRect(0, 0, size, size);
-  ctx.globalCompositeOperation = 'source-over';
+      void main() {
+        vU = aU;
+        vV = aV;
+        // instanceColor の R に「蓄えの割合」が入っている
+        #ifdef USE_INSTANCING_COLOR
+          vCharge = instanceColor.r;
+        #else
+          vCharge = 1.0;
+        #endif
 
-  const tex = new THREE.CanvasTexture(c);
-  tex.needsUpdate = true;
-  return tex;
+        vec3 p = position;
+        // 揺らぎ。根元は動かさず、先へ行くほど大きく。植物の揺れではなく
+        // クラゲの傘のように、面全体がゆっくり波打つようにする
+        float ph = aPh;
+        #ifdef USE_INSTANCING
+          ph += instanceMatrix[3][0] * 0.7 + instanceMatrix[3][2] * 0.9;
+        #endif
+        float s = sin(uTime * uSwaySpeed + ph + aU * 2.1);
+        float s2 = sin(uTime * uSwaySpeed * 0.63 + ph * 1.7 + aV * 1.3);
+        p.y += (s * 0.7 + s2 * 0.3) * uSwayAmp * pow(aU, 1.8);
+        p.xz *= 1.0 + 0.035 * s2 * pow(aU, 1.5);
+
+        // --- 光粒による局所的な照明 ---
+        //
+        // 「中心からの距離 × 総量」で近似するのをやめ、**粒 1 つずつからの距離**で足す。
+        // 近似のままだとどの花も同じ形に光り、粒がどこにいるかが膜に出ない。
+        // 頂点ごとに計算する（膜は滑らかなので断面ごとの補間で足りる）。
+        float nOn = vCharge * float(CAPACITY);  // active は GLSL の予約語なので使えない
+        float lit = 0.0;
+        for (int i = 0; i < CAPACITY; i++) {
+          // 蓄えの数だけを数える。break ではなく係数で消す（古い GLSL でも通る）
+          float on = step(float(i) + 0.5, nOn);
+          vec3 dd = p - uSlots[i];
+          lit += on / (1.0 + dot(dd, dd) * uLightFall);
+        }
+        vLit = lit;
+
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        vec3 nrm = normalMatrix * normal;
+        #ifdef USE_INSTANCING
+          mv = modelViewMatrix * instanceMatrix * vec4(p, 1.0);
+          nrm = normalMatrix * mat3(instanceMatrix) * normal;
+        #endif
+        // 面がどれだけ正面を向いているか。0 = 真横（シルエット）
+        vNdv = abs(dot(normalize(nrm), normalize(-mv.xyz)));
+        vDepth = -mv.z;
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      precision mediump float;
+      uniform vec3 uTint;
+      uniform vec3 uGlowCool;
+      uniform vec3 uGlowWarm;
+      uniform float uAlpha;
+      uniform float uBodyLit;
+      uniform float uGlowGain;
+      uniform vec3 uFogColor;
+      uniform float uFogDensity;
+      varying float vU;
+      varying float vV;
+      varying float vCharge;
+      varying float vDepth;
+      varying float vLit;
+      varying float vNdv;
+
+      void main() {
+        // 膜の縁。**硬い輪郭を一切作らない**のがこの作品での最優先。
+        //
+        // ここに「平坦部」を作ってはいけない。smoothstep(0.0, 0.62, edge) のように
+        // 途中で 1.0 に達する形にすると、達した所に**輪郭線が立って板に見える**
+        // （実際に一度そうなった。ガラスの破片のような直線が何本も出た）。
+        // 中心線でだけ最大になり、面の端では必ず 0 になる連続な関数を掛け合わせる。
+        float edge = 1.0 - abs(vV);
+        float side = pow(smoothstep(0.0, 1.0, edge), 1.25);
+        float tip  = smoothstep(1.0, 0.30, vU);       // 先は丸く消える
+        float root = smoothstep(0.0, 0.34, vU);       // 根元も落として器の底を空ける
+        // 面を真横から見ている所は溶かす。
+        // ここを入れないと、器の下側のようにほぼ真横を向く面でシルエットが
+        // 幅 0 の直線として立ち、「硬い板」に見える。
+        float face = smoothstep(0.0, 0.34, vNdv);
+
+        // 膜の厚み。散乱はこちらに比例させる（稜を掛けない）
+        float aBase = uAlpha * side * tip * root * face;
+        // 花びらの中心線に柔らかい稜を入れる。これが無いと 7 枚が溶け合って
+        // 「器」ではなく「霞」に見える。線ではなく指数の山なので輪郭は立たない。
+        // **稜は膜の見た目だけに効かせる。** 散乱にも掛けると中心線だけが明るくなり、
+        // 遠目に放射状の光条（レンズフレア）に見える（§12 で一度却下した見え方）
+        float vein = exp(-abs(vV) * 3.2);
+        float a = aBase * (0.72 + 0.50 * vein);
+
+        // 散乱の量は **その点の近くに光粒が何個いるか** で決まる（頂点で計算済み）。
+        // 花は自分では光らないので、粒が抜ければ vLit が 0 になり形だけが残る。
+        float glow = vLit * uGlowGain;
+
+        // 膜そのものの色（発光ではない。形が辛うじて見える最低限）
+        vec3 body = uTint * (uBodyLit + 0.22 * edge);
+        // 散乱。中心は暖色寄り、外へ行くほど寒色へ。
+        // **膜のある所でしか散らない**ので a を掛ける。掛けないと、膜が透明な
+        // 場所にまで光が足されて、器の中心が白い塊に潰れる。
+        vec3 scat = mix(uGlowWarm, uGlowCool, clamp(vU * 1.4, 0.0, 1.0)) * glow * aBase;
+
+        // 霧。遠い花は水に溶ける
+        float fog = 1.0 - exp(-uFogDensity * uFogDensity * vDepth * vDepth);
+        vec3 rgb = mix(body * a + scat, uFogColor * a, fog);
+        gl_FragColor = vec4(rgb, a * (1.0 - fog * 0.55));
+      }
+    `,
+  });
 }
 
 // ---------------------------------------------------------------
@@ -357,14 +503,25 @@ function makeFishTexture(w, h) {
 // 光の位置と花弁の位置がずれないよう、両方でこの1か所を使う。
 // ---------------------------------------------------------------
 const FLOWER_BASE_DY = -0.4;   // 花の根元の高さ（ecosystem の y からの差）
-const FLOWER_DY_JITTER = 2.6;  // 高さの個体差の幅。0 だと横一列の生垣に見える
+const FLOWER_DY_JITTER = 6.2;  // 高さの個体差の幅。器を大きくしたぶん広げないと、
+                               // 縁どうしが重なって横一列の帯に融合する（実際にそうなった）
 
 function hash2(x, z, ax, az, k) {
   return (Math.abs(Math.sin(x * ax + z * az)) * k) % 1;
 }
 
+/**
+ * 花の姿勢。**光粒の配置と花弁の描画で必ず同じものを使う。**
+ * 別々に計算すると、器が傾いているのに光だけ傾かない、という壊れ方をする。
+ */
+function flowerQuaternion(ft, out) {
+  _euler2.set((ft.h2 - 0.5) * 0.42, ft.h2 * Math.PI * 2, (ft.h3 - 0.5) * 0.42);
+  return out.setFromEuler(_euler2);
+}
+
 /** 割り当てを起こさないよう、結果は使い回しのオブジェクトに書く。 */
 const _ft = { h1: 0, h2: 0, h3: 0, baseY: 0, scale: 0 };
+const _euler2 = new THREE.Euler();
 function flowerTransform(f, out) {
   out.h1 = hash2(f.x, f.z, 12.9898, 78.233, 43758.5453);
   out.h2 = hash2(f.x, f.z, 39.3468, 11.1350, 24634.6345);
@@ -719,55 +876,95 @@ export class Renderer {
   // ---------------------------------------------------------------
   // 花：花弁6枚のクアッドを1つに束ね、InstancedMesh で24本を1ドローコールに
   // ---------------------------------------------------------------
+  /**
+   * 器（花冠）を組む。
+   *
+   * 平らな板を放射状に並べる作りをやめ、**中心が窪んだ器の面を直接張る**。
+   * 板だと (1) 硬く見え (2) 器の内側という空間ができないので、
+   * 「内部に光が浮かんでいる」を絵として作れなかった。
+   *
+   * 花びら 1 枚は u（根元 0 → 先 1）× v（左右 -1..1）の格子。
+   * 枚数・角度・長さ・幅・うねりの位相を枚ごとにずらし、左右対称にしない。
+   */
   _buildFlowers() {
     const max = this.eco.params.flowerMax;
-    const petals = 8;
-    // 幅を広く・丈を短くして、8 枚が重なって「椀」になるようにする。
-    // 細長いと隣と重ならず、遠目に放射状の光条（レンズフレア）に見える。
-    const w = 2.6, h = 2.7, tilt = 1.18; // 外へ倒す角度（rad）。立てるとワイングラスに見える
+    const P = CONF.flowerPetals;
+    const NU = CONF.flowerSegU, NV = CONF.flowerSegV;
 
     const vtx = [];
-    const uvs = [];
+    const aU = [];      // 中心からの距離（0..1）。散乱の計算に使う
+    const aV = [];      // 花びらの幅方向（-1..1）。縁の抜けに使う
+    const aPh = [];     // 枚ごとの揺れの位相
     const idx = [];
-    for (let k = 0; k < petals; k++) {
-      const a = (k / petals) * Math.PI * 2;
+
+    // 枚ごとのばらつき。乱数ではなく決まった式から出す（毎回同じ形になる）
+    const jit = (k, s) => (Math.abs(Math.sin(k * 12.9898 + s * 78.233)) * 43758.5453) % 1;
+
+    for (let k = 0; k < P; k++) {
+      const asym = CONF.flowerAsym;
+      const ang = (k / P) * Math.PI * 2 + (jit(k, 1) - 0.5) * asym;
+      const len = CONF.flowerLength * (1 + (jit(k, 2) - 0.5) * asym);
+      const wid = CONF.flowerWidth * (1 + (jit(k, 3) - 0.5) * asym * 1.2);
+      const ph = jit(k, 4) * Math.PI * 2;
+      const ca = Math.cos(ang), sa = Math.sin(ang);
       const base = vtx.length / 3;
-      // ローカル：根元 y=0、先端 y=h。外へ tilt だけ倒してから y 軸まわりに回す
-      const quad = [
-        [-w / 2, 0], [w / 2, 0], [w / 2, h], [-w / 2, h],
-      ];
-      for (const [qx, qy] of quad) {
-        const ty = Math.cos(tilt) * qy;
-        const tr = Math.sin(tilt) * qy; // 外向きの距離
-        const x = qx * Math.cos(a) - 0 * Math.sin(a) + Math.cos(a) * tr;
-        const z = qx * Math.sin(a) + 0 * Math.cos(a) + Math.sin(a) * tr;
-        vtx.push(x, ty, z);
+
+      for (let i = 0; i <= NU; i++) {
+        const u = i / NU;
+        // 幅：根元で細く、中ほどで最大、**先を 0 にしない**。
+        // 0 にすると幾何が尖って刃物に見える（実際に一度そうなった）。
+        // 「先端は丸く柔らかく」はアルファ側で作る。
+        const hw = wid * (0.40 + 0.60 * Math.sin(Math.PI * Math.pow(u, 0.60)));
+        const r = len * u;
+        for (let j = 0; j <= NV; j++) {
+          const v = (j / NV) * 2 - 1;
+          // 器の断面：中心が最も低く、外へ行くほど立ち上がる
+          let y = CONF.flowerDepth * Math.pow(u, 1.7);
+          // うねり。先へ行くほど大きく波打たせる（クラゲの傘の縁）
+          y += CONF.flowerWaveU * Math.sin(u * Math.PI * 1.7 + ph) * Math.pow(u, 1.4);
+          y += CONF.flowerWaveV * Math.sin(v * Math.PI * 1.15 + ph * 2) * Math.pow(u, 1.5);
+          const off = v * hw;
+          vtx.push(ca * r - sa * off, y, sa * r + ca * off);
+          aU.push(u);
+          aV.push(v);
+          aPh.push(ph);
+        }
       }
-      uvs.push(0, 0, 1, 0, 1, 1, 0, 1);
-      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+
+      const row = NV + 1;
+      for (let i = 0; i < NU; i++) {
+        for (let j = 0; j < NV; j++) {
+          const a = base + i * row + j;
+          idx.push(a, a + 1, a + row, a + 1, a + row + 1, a + row);
+        }
+      }
     }
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(vtx, 3));
-    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setAttribute('aU', new THREE.Float32BufferAttribute(aU, 1));
+    geo.setAttribute('aV', new THREE.Float32BufferAttribute(aV, 1));
+    geo.setAttribute('aPh', new THREE.Float32BufferAttribute(aPh, 1));
     geo.setIndex(idx);
+    // 法線を作る。**シルエットで膜を溶かすのに要る。**
+    // 面を斜めから見ると、縁のなだらかな変化が画面上ほぼ幅 0 に圧縮され、
+    // 直線が立って「硬い板」に見える（実際に器の下側に直線が走った）
+    geo.computeVertexNormals();
 
-    const mat = new THREE.MeshBasicMaterial({
-      map: makePetalTexture(128),
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      fog: true,
-      opacity: CONF.flowerOpacity,
-    });
+    const cap = this.eco.params.flowerCapacity;
+    this._slots = makeFlowerSlots(cap);
+    const mat = makePetalMaterial(this._slots, cap);
+    this.flowerMat = mat;
 
     this.flowerMesh = new THREE.InstancedMesh(geo, mat, max);
     this.flowerMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.flowerMesh.frustumCulled = false;
     this.flowerMesh.count = max;
-    // 蓄えに応じて明るくするため、インスタンスごとの色を持たせる
-    this.flowerMesh.setColorAt(0, new THREE.Color(1, 1, 1));
+    // 光より後に描く。膜は光を遮りながら散乱もするので、
+    // 先に描くと「花びら越しに透けて見える」にならない
+    this.flowerMesh.renderOrder = 4;
+    // 蓄えの量を instanceColor の R に載せる（G/B は個体差の色味に使う）
+    this.flowerMesh.setColorAt(0, new THREE.Color(0, 0, 0));
     this.flowerMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(this.flowerMesh);
 
@@ -862,6 +1059,7 @@ export class Renderer {
     this.lightMat.uniforms.uFocus.value = CONF.focusNear + (CONF.focusFar - CONF.focusNear) * f;
 
     this.moteMat.uniforms.uTime.value = this.time;
+    this.flowerMat.uniforms.uTime.value = this.time;
     this.moteMat.uniforms.uPointer.value.set(this.pointer.x, this.pointer.y);
 
     this._updateLights();
@@ -890,21 +1088,30 @@ export class Renderer {
       n++;
     }
 
-    // 花の蓄え（暖色）。椀の底から放射状に伸びる糸の先に載せる（§11.8）
-    // eco.flowers は毎回 slice するので描画ループでは使わない（確保を避ける）
-    const fil = this._filament;
+    // 花の蓄え（暖色）。**器の内側に浮かべる。**
+    //
+    // 以前は椀の底から放射状に伸びる「糸」の先に載せていたが、
+    // 器そのものを作った今は、その内側の空間に散らすほうが素直で、
+    // 「花の内部に光が漂っている」がそのまま絵になる。
+    // 中心ほど密にするため半径に指数を掛ける（均等に置くと輪に見える）。
     const flowers = eco._flowers;
+    const slots = this._slots;
+    const t = this.time;
     for (let i = 0; i < eco.flowerCount; i++) {
       const f = flowers[i];
-      // 花弁と同じ個体差を使う。ここを別に計算すると光の塊が椀から浮く
+      // 花弁と同じ個体差・同じ回転を使う。**膜の照明もこの表を見ている**ので、
+      // ここを別に計算すると「光っている場所」と「粒の場所」がずれる
       const ft = flowerTransform(f, _ft);
-      const spread = CONF.flowerLightSpread * ft.scale;
+      flowerQuaternion(ft, this._q);
       for (let k = 0; k < f.charge && n < this.lightN; k++) {
-        const d = n * 3, ob = ((i * 31 + k) % this.lightN) * 3;
-        const r = spread * fil[ob + 2];     // u^1.56（中心に密）
-        pos[d] = f.x + fil[ob] * r;
-        pos[d + 1] = ft.baseY + CONF.flowerLightBase * ft.scale + r * CONF.flowerLightArc;
-        pos[d + 2] = f.z + fil[ob + 1] * r;
+        const d = n * 3, sb = k * 3;
+        // ゆっくりした漂い。器の中で息をしているように見せる
+        const bob = Math.sin(t * 0.55 + k * 1.7 + f.x * 0.3) * CONF.flowerLightBob;
+        this._v3.set(slots[sb], slots[sb + 1] + bob, slots[sb + 2]);
+        this._v3.applyQuaternion(this._q).multiplyScalar(ft.scale);
+        pos[d] = f.x + this._v3.x;
+        pos[d + 1] = ft.baseY + this._v3.y;
+        pos[d + 2] = f.z + this._v3.z;
         warm[n] = 1;
         scale[n] = CONF.lightWarmBoost;
         n++;
@@ -951,17 +1158,12 @@ export class Renderer {
         // 同じ形が並んで「横一列の帯」に見えてしまう。
         // 回転はインデックスではなく位置から決める（swap-remove で index が
         // 入れ替わったときに花が突然回るのを避けるため）。
-        this._euler.set(
-          (ft.h2 - 0.5) * 0.42,          // 前後の傾き
-          ft.h2 * Math.PI * 2,           // Y 軸まわり
-          (ft.h3 - 0.5) * 0.42           // 左右の傾き
-        );
-        this._q.setFromEuler(this._euler);
+        flowerQuaternion(ft, this._q);   // 光粒の配置と同じ式（1か所にまとめてある）
         this._v3b.set(s, s, s);
         this._m4.compose(this._v3, this._q, this._v3b);
-        // 蓄えが多いほど明るい。色相はテクスチャ側が持つので、ここは明度だけ
-        const lit = 0.55 + Math.min(1, f.charge / cap) * 0.85;
-        this._color.setRGB(lit, lit, lit);
+        // R に蓄えの割合を載せる。**花は自分では光らないので下駄を履かせない。**
+        // 0 のときは 0 にして、光が抜けた花は形の輪郭だけが残るようにする。
+        this._color.setRGB(Math.min(1, f.charge / cap), ft.h1, ft.h3);
       } else {
         this._m4.makeScale(0, 0, 0);
         this._color.setRGB(0, 0, 0);
