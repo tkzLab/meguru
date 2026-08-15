@@ -218,7 +218,30 @@ const CONF = {
 
   fishScale: 0.85,
   fishLength: 2.10,   // 板の長さ（旧 ShapeGeometry の全長と同じ）
-  fishOpacity: 0.78,  // 縁をぼかしたぶん芯は少し濃くしないと影が薄くなる
+  /**
+   * 魚の不透明度（段2）。
+   *
+   * **パラメータの値ではなく、画面で測った「実効の不透明度」で決める。**
+   *   実効の不透明度 = 1 − (魚の内部の輝度中央値 ÷ 局所背景の輝度中央値)
+   * ムードボードの実測は中央 0.399（`work/measure-fish.py`）。
+   * 掃引の実測（`work/sweep-fish-opacity.mjs`。4時刻 × 同じ7匹）:
+   *   0.78 → 0.547（＝これまでの値。ムードボードより濃い「黒い板」寄り）
+   *   0.70 → 0.474
+   *   0.63 → 0.448
+   *   0.55 → 0.389  ← 採用。ムードボードの 0.399 と −0.010
+   * 検査は `work/check-fish-density.mjs`（魚だけを白で描いたマスクで画素を固定する）。
+   */
+  fishOpacity: 0.55,
+  /**
+   * 積載光を魚からどれだけ離すか（全長に対する比。段2）。
+   *
+   * ムードボードでは積載光の重心が魚の**全長の 0.76〜1.47 倍だけ離れた位置**にある
+   * （4匹の実測）。実装は魚の座標そのものに重ねていたため、
+   * 「魚が光を運んでいる」ではなく「魚が光っている」に見え、
+   * さらに**魚の黒の濃度を測ろうとすると光に埋もれて測れなかった**。
+   * 進行方向の逆側（＝曳いている側）に置く。
+   */
+  fishCargoLead: 1.10,
 
   fogDensity: 0.016,
 };
@@ -1182,12 +1205,18 @@ export class Renderer {
     const fishes = eco.fishes;
     for (let i = 0; i < fishes.length; i++) {
       const fi = fishes[i];
+      // 積載は魚に重ねず、進行方向の逆側へ全長の CONF.fishCargoLead 倍だけ離す（§11.12）
+      const sp = Math.hypot(fi.vx, fi.vy, fi.vz);
+      const lead = CONF.fishLength * CONF.fishScale * CONF.fishCargoLead;
+      const lx = sp > 0.01 ? -fi.vx / sp * lead : 0;
+      const ly = sp > 0.01 ? -fi.vy / sp * lead : 0;
+      const lz = sp > 0.01 ? -fi.vz / sp * lead : 0;
       for (let k = 0; k < fi.cargo && n < this.lightN; k++) {
         const d = n * 3, ob = ((i * 97 + k) % this.lightN) * 3;
         const cs = CONF.fishCargoSpread;
-        pos[d] = fi.x + off[ob] * cs;
-        pos[d + 1] = fi.y + off[ob + 1] * cs * 0.7;
-        pos[d + 2] = fi.z + off[ob + 2] * cs;
+        pos[d] = fi.x + lx + off[ob] * cs;
+        pos[d + 1] = fi.y + ly + off[ob + 1] * cs * 0.7;
+        pos[d + 2] = fi.z + lz + off[ob + 2] * cs;
         warm[n] = 1;
         scale[n] = CONF.lightWarmBoost;
         n++;
