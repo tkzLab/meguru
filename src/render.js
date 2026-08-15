@@ -168,6 +168,17 @@ const CONF = {
   // 数を 24 → 13 に減らしたぶん、一輪を大きくする（仕様「巨大な生命体」）。
   // 遠景では淡い光、中景で輪郭、近景で膜と光粒、という階層を作るための土台
   flowerScale: 1.62,
+  /**
+   * 大きさの階層（段3）。scale = flowerScale × (Min + h^Gamma × Span) × 育ち具合。
+   *
+   * ムードボードの花は画面幅比 8.4%〜62.4% ＝ **7.46 倍の階層**を持つ。
+   * 実装は 0.72〜1.47 の一様分布（2.0 倍）で、しかも全部が同じ高さに並ぶため、
+   * 器と光の裾が横に連なって**ひとつながりの発光帯**になっていた。
+   * Gamma > 1 で「小さい花が多数・大きい花は少数」にすると、間に暗い水の隙間ができる。
+   */
+  flowerScaleMin: 0.42,
+  flowerScaleSpan: 1.75,
+  flowerScaleGamma: 2.4,
 
   /* --- 器の形（深海の花とクラゲの中間） --- */
   flowerPetals: 7,          // 花びらの枚数
@@ -600,7 +611,13 @@ function flowerTransform(f, out) {
   out.h2 = hash2(f.x, f.z, 39.3468, 11.1350, 24634.6345);
   out.h3 = hash2(f.x, f.z, 7.1234, 53.7891, 15731.7430);
   const grow = Math.min(1, f.age / 6);
-  out.scale = CONF.flowerScale * (0.72 + out.h1 * 0.75) * (0.55 + grow * 0.45);
+  // 大きさの階層（段3）。**一様なばらつきでは階層にならない。**
+  // 0.72〜1.47（2.0倍）では全部が「同じくらいの花」に見え、器と光の裾が横に連なって
+  // ひとつながりの発光帯になっていた（最大の光る塊が全体の 98.7〜100%）。
+  // h1 を冪乗して「小さい花が多数・大きい花は少数」に寄せる。
+  out.scale = CONF.flowerScale
+    * (CONF.flowerScaleMin + Math.pow(out.h1, CONF.flowerScaleGamma) * CONF.flowerScaleSpan)
+    * (0.55 + grow * 0.45);
   out.baseY = f.y + FLOWER_BASE_DY + (out.h1 - 0.5) * FLOWER_DY_JITTER;
   return out;
 }
