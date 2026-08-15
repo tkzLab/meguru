@@ -217,7 +217,7 @@ const CONF = {
   flowerVeinSlope: 10,     // 中心線から外へ倒れる強さ。0 だと横縞になる
   flowerVeinWidth: 0.30,    // 線の太さ（周期に対する比）。細いほどモアレに弱い
   flowerVeinGain: 0.55,     // 稜の強さ（膜そのものの濃淡）
-  flowerVeinScat: 1.4,     // 稜の強さ（散乱側。平均0の変調なので総光量は変わらない）
+  flowerVeinScat: 1.0,     // 稜の強さ（散乱側。平均0の変調なので総光量は変わらない）
   flowerMembraneBase: 0.72, // 膜の下地。葉脈を足したぶんの明るさはここで戻す
 
   flowerAlpha: 0.42,        // 膜そのものの不透明度。上げると光を遮って暗くなる
