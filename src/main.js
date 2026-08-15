@@ -84,6 +84,24 @@ async function acquireWakeLock() {
 }
 acquireWakeLock();
 
+// **読み込み時の1回だけでは Safari で必ず失敗する。**
+// Wake Lock はユーザー操作（transient activation）を起点にしないと `NotAllowedError` になり、
+// visibilitychange からの再取得（resume）も操作起点ではないので同じ理由で失敗し続ける。
+// 実機の1時間ソーク（§8.6）で「Wake Lock なし(NotAllowedError)」のまま走っていたのがこれ。
+//
+// §3 のとおりこの作品は操作させないので、**専用のボタンは置かない**。
+// 設置時に必ず起きる最初の接触（タップ・クリック・キー）に相乗りして取り直す。
+const FIRST_GESTURE_EVENTS = ['pointerdown', 'touchend', 'keydown'];
+function onFirstGesture() {
+  acquireWakeLock();
+  // 取得は非同期なので成否に関わらず1回で降りる。
+  // 失敗したままなら次の resume() が拾う（そのときは操作直後である可能性が高い）
+  for (const ev of FIRST_GESTURE_EVENTS) window.removeEventListener(ev, onFirstGesture);
+}
+for (const ev of FIRST_GESTURE_EVENTS) {
+  window.addEventListener(ev, onFirstGesture, { passive: true });
+}
+
 // --- バックグラウンドからの復帰（§6.4） ---
 function resume() {
   stats.resumes++;
