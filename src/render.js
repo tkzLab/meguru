@@ -166,6 +166,12 @@ const CONF = {
   // 環境の微粒子（保存則の外。空気を作るためだけに在る）: 基準距離で 1.8px
   moteCount: 12000,
   moteSize: 2.4,
+  /**
+   * 高さ方向の偏り（段6・§11.17）。y = rnd()^bias なので、大きいほど下（樹冠のあたり）に寄る。
+   * 一様に近いと §11.4 で決めた「上半分は開けた暗い水」を微粒子が塗りつぶし、
+   * 長時間眺めたときに §4 が警戒する「綺麗な砂嵐」に近づく（Codex の指摘4）。
+   */
+  moteHeightBias: 3.6,
   moteOpacity: 1.0,
 
   // 花：主役は花そのものではなく、花が抱えている光。
@@ -948,7 +954,7 @@ export class Renderer {
     for (let i = 0; i < n; i++) {
       pos[i * 3] = (rnd() * 2 - 1) * W.x * 0.62;
       // 下ほど密。樹冠のあたりに空気の密度を作る
-      pos[i * 3 + 1] = Math.pow(rnd(), 1.7) * W.y * 0.85 + 0.2;
+      pos[i * 3 + 1] = Math.pow(rnd(), CONF.moteHeightBias) * W.y * 0.85 + 0.2;
       pos[i * 3 + 2] = (rnd() * 2 - 1) * W.z * 0.62;
       phase[i] = rnd() * Math.PI * 2;
       scale[i] = 0.55 + rnd() * 0.75;
