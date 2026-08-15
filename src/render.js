@@ -57,14 +57,14 @@ export const PALETTE = {
 
 const CONF = {
   // カメラ（design.md §5 / §11.4）
-  camDistance: 48,
+  camDistance: 24,
   camHeight: 14.0,
-  camTargetY: 6.5,
+  camTargetY: 4.0,
   camFov: 42,
   // 縦長の画面だけカメラを引く（段5・§11.16）。基準より横長では何もしない
   camNarrowAspect: 0.85,     // これより縦長になったら効かせ始める
   camNarrowFull: 0.45,       // ここで倍率が最大になる（iPhone 縦は 0.52）
-  camNarrowDistGain: 1.9,   // 最大の距離倍率
+  camNarrowDistGain: 2.4,   // 最大の距離倍率
 
   camSwingDeg: 8,      // ±8°
   camPeriodSec: 120,
@@ -171,7 +171,7 @@ const CONF = {
    * 一様に近いと §11.4 で決めた「上半分は開けた暗い水」を微粒子が塗りつぶし、
    * 長時間眺めたときに §4 が警戒する「綺麗な砂嵐」に近づく（Codex の指摘4）。
    */
-  moteHeightBias: 3.6,
+  moteHeightBias: 8.0,
   moteOpacity: 1.0,
 
   // 花：主役は花そのものではなく、花が抱えている光。
@@ -709,7 +709,7 @@ export class Renderer {
     });
     this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace; // 出力変換もしない（上のコメント参照）
     // §6.3 解像度を落とすのが最大の節約。輪郭が無いので劣化がほぼ見えない
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.00));
     this.renderer.setClearColor(PALETTE.bgBottom, 1);
     this.renderer.autoClear = false;
 
