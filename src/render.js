@@ -197,6 +197,18 @@ const CONF = {
   flowerSegV: 10,
 
   /* --- 膜の見え方 --- */
+  /**
+   * 葉脈（段4）。ムードボードは水平走査1本あたり 75〜83 本・間隔は花幅の 0.9〜1.1%・
+   * 稜と膜平均のコントラスト 1.17〜1.32x。旧実装は花弁1枚に中心稜1本＝7本で**1桁足りない**。
+   * 断片シェーダ内で完結させる（ジオメトリを増やすと透明な膜の重ね塗りが増える＝§6.2 と逆）。
+   */
+  flowerVeinCount: 30,      // 花弁1枚あたりの葉脈の本数（長さ方向の周期数）
+  flowerVeinSlope: 10,     // 中心線から外へ倒れる強さ。0 だと横縞になる
+  flowerVeinWidth: 0.30,    // 線の太さ（周期に対する比）。細いほどモアレに弱い
+  flowerVeinGain: 0.55,     // 稜の強さ（膜そのものの濃淡）
+  flowerVeinScat: 1.4,     // 稜の強さ（散乱側。平均0の変調なので総光量は変わらない）
+  flowerMembraneBase: 0.72, // 膜の下地。葉脈を足したぶんの明るさはここで戻す
+
   flowerAlpha: 0.42,        // 膜そのものの不透明度。上げると光を遮って暗くなる
   flowerBodyLit: 0.16,      // 光が無くても見える最低限の明るさ（形の輪郭）
   flowerGlowGain: 0.30,     // 光粒 1 個が膜を照らす強さ
@@ -357,6 +369,12 @@ function makePetalMaterial(slots, capacity) {
       uSwaySpeed: { value: CONF.flowerSwaySpeed },
       uFogColor: { value: new THREE.Color(PALETTE.bgTop) },
       uFogDensity: { value: CONF.fogDensity },
+      uVeinCount: { value: CONF.flowerVeinCount },
+      uVeinSlope: { value: CONF.flowerVeinSlope },
+      uVeinWidth: { value: CONF.flowerVeinWidth },
+      uVeinGain: { value: CONF.flowerVeinGain },
+      uVeinScat: { value: CONF.flowerVeinScat },
+      uMembraneBase: { value: CONF.flowerMembraneBase },
     },
     vertexShader: /* glsl */ `
       attribute float aU;
@@ -433,6 +451,12 @@ function makePetalMaterial(slots, capacity) {
       uniform float uGlowGain;
       uniform vec3 uFogColor;
       uniform float uFogDensity;
+      uniform float uVeinCount;
+      uniform float uVeinSlope;
+      uniform float uVeinWidth;
+      uniform float uVeinGain;
+      uniform float uVeinScat;
+      uniform float uMembraneBase;
       varying float vU;
       varying float vV;
       varying float vCharge;
@@ -463,7 +487,29 @@ function makePetalMaterial(slots, capacity) {
         // **稜は膜の見た目だけに効かせる。** 散乱にも掛けると中心線だけが明るくなり、
         // 遠目に放射状の光条（レンズフレア）に見える（§12 で一度却下した見え方）
         float vein = exp(-abs(vV) * 3.2);
-        float a = aBase * (0.72 + 0.50 * vein);
+
+        // 分岐する葉脈（段4）。ムードボードは花幅の 0.9〜1.1% 間隔で 75〜83 本あり、
+        // 中心稜1本だけの旧実装は**1桁足りなかった**。
+        //
+        // 長さ方向(vU)に周期を持たせ、|vV| でその周期をずらす ＝ 中心線から外へ倒れる V 字。
+        // **fract の不連続を跨がない形にすること。** abs(fract(x) - 0.5) は値が連続なので
+        // 線が途中で切れて輪郭が立つことがない（floor で区画を切る作りは境界で必ず段が出る）。
+        // ※ ここは JS のテンプレートリテラルの中なので、コメントにバッククォートを書かない。
+        float phase = vU * uVeinCount - abs(vV) * uVeinSlope;
+        float tri = abs(fract(phase) - 0.5) * 2.0;
+        float line = exp(-tri * tri / (uVeinWidth * uVeinWidth));
+        // 1画素に周期が詰まったら消す（モアレ防止）。**本数ではなくコントラストを落とす**。
+        // fwidth(phase) は「1画素で位相がいくつ進むか」なので、0.5 で 2画素に1周期。
+        // 花は画面上 117〜1000px と 8.6 倍の開きがあり、小さい花では必ず 1px を割る（§11.8）。
+        float lodV = 1.0 - smoothstep(0.22, 0.45, fwidth(phase));
+        // 端では必ず 0 に落として輪郭を立てない（膜の縁と同じ考え方）
+        float venv = smoothstep(0.02, 0.20, vU) * smoothstep(1.0, 0.55, vU) * pow(1.0 - abs(vV), 1.2);
+        // **平均を引いて「変調」にする。** 足しっぱなしにすると膜が一様に明るくなり、
+        // §11.3 の明るさ予算（輝度70以上・白飛び）に効いてしまう。
+        // ガウス線の周期あたりの面積はおよそ 幅 × 0.886。
+        float veinMod = (line - uVeinWidth * 0.886) * lodV * venv;
+
+        float a = aBase * (uMembraneBase + 0.50 * vein + uVeinGain * veinMod);
 
         // 散乱の量は **その点の近くに光粒が何個いるか** で決まる（頂点で計算済み）。
         // 花は自分では光らないので、粒が抜ければ vLit が 0 になり形だけが残る。
@@ -474,7 +520,15 @@ function makePetalMaterial(slots, capacity) {
         // 散乱。中心は暖色寄り、外へ行くほど寒色へ。
         // **膜のある所でしか散らない**ので a を掛ける。掛けないと、膜が透明な
         // 場所にまで光が足されて、器の中心が白い塊に潰れる。
-        vec3 scat = mix(uGlowWarm, uGlowCool, clamp(vU * 1.4, 0.0, 1.0)) * glow * aBase;
+        // **葉脈は散乱にも掛ける。ただし平均0の変調としてだけ。**
+        // §12 は「稜を散乱に掛けると放射状の光条になる」として一度却下しているが、
+        // あれは**花弁1枚に中心稜1本**＝半径方向に伸びる1本線だったのが原因。
+        // 段4 の葉脈は花幅の 1% 間隔の細かい V 字なので、遠目には縞ではなく質感になる。
+        // 掛けないと葉脈は見えない ―― 明るい所は body ではなく scat が作っているため
+        // （膜の a だけを変えた最初の実装は、実測で本数 0.2 本のまま動かなかった）。
+        // 平均0なので散乱の総量は変わらず、§11.3 の予算には効かない。
+        vec3 scat = mix(uGlowWarm, uGlowCool, clamp(vU * 1.4, 0.0, 1.0)) * glow * aBase
+                  * (1.0 + uVeinScat * veinMod);
 
         // 霧。遠い花は水に溶ける
         float fog = 1.0 - exp(-uFogDensity * uFogDensity * vDepth * vDepth);
