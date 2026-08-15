@@ -61,6 +61,11 @@ const CONF = {
   camHeight: 14.0,
   camTargetY: 6.5,
   camFov: 42,
+  // 縦長の画面だけカメラを引く（段5・§11.16）。基準より横長では何もしない
+  camNarrowAspect: 0.85,     // これより縦長になったら効かせ始める
+  camNarrowFull: 0.45,       // ここで倍率が最大になる（iPhone 縦は 0.52）
+  camNarrowDistGain: 1.9,   // 最大の距離倍率
+
   camSwingDeg: 8,      // ±8°
   camPeriodSec: 120,
   focusPeriodSec: 47,  // ピント面の往復周期。120 と揃えないことで長時間反復しない
@@ -1192,25 +1197,65 @@ export class Renderer {
     const scale = (h * pr) / CONF.refBufferHeight;
     this.lightMat.uniforms.uSizeScale.value = scale;
     this.moteMat.uniforms.uSizeScale.value = scale;
+
+    // 縦長の画面ではカメラを引く（段5・§11.16）。**引いたぶん、距離を基準にしている
+    // 定数を全部いっしょにスケールしないと絵が死ぬ。**
+    // 引くだけにすると iPhone 縦の明るい画素が 5万 → 4.9千（10分の1）に落ちた。
+    // 主因は霧で、fog = 1 − exp(−(0.016·深度)²) は深度 48 で 45%、91 で 88% になる。
+    // ピント（焦点距離が絶対値）と粒の大きさ（refDist/depth）も同じ理由で狂う。
+    // **「カメラを引く」ではなく「見る尺度を変える」と考えれば、距離の定数が追従するのが自然。**
+    const k = this._narrowFactor();
+    // **粒の大きさ（uRefDist）は補正しない。** 引いたぶん小さく見えるのが「引く」ということ。
+    // 補正すると同じ大きさの粒が 1.9 倍の範囲ぶん画面に入り、加算合成で重なって
+    // 白飛びが 0.433%（上限 0.1%）まで跳ねた。補正するのは**水の見え方**だけ。
+    this.lightMat.uniforms.uFocusRange.value = CONF.focusRange * k;
+    const fogK = CONF.fogDensity / k;
+    this.lightMat.uniforms.uFogDensity.value = fogK;
+    this.moteMat.uniforms.uFogDensity.value = fogK;
+    if (this.flowerMat) this.flowerMat.uniforms.uFogDensity.value = fogK;   // resize は花より先に来ることがある
+    if (this.scene.fog) this.scene.fog.density = fogK;
   }
 
   /** ecosystem を1ステップ進めたあとに呼ぶ。dt は固定 1/30。 */
+  /**
+   * 縦長の画面でカメラを引く倍率（段5 / design.md §11.16）。
+   *
+   * 縦画角を固定したまま画面が縦長になると**横に見える世界だけが狭くなり**、
+   * 樹冠の帯が左右で切れて「横長世界を縦窓で覗いた断片」になる（Codex の指摘6）。
+   * iPhone 縦（aspect 0.52）では花の収まり率が iPad の 77% に対し 31〜45% しかなかった。
+   *
+   * **縦画角を広げて横画角を保つ**やり方は採らない。aspect 0.52 で縦 42° → 89° になり、
+   * 魚眼になって §11.4 の構図（樹冠は下から1/3・上半分は暗い水）が壊れる。
+   * カメラを引けば縦横が同じ比で広がるので、構図の比率は保ったまま切れだけが減る。
+   *
+   * 主想定は iPad なので、**基準より横長の画面では 1.0（何もしない）**。
+   */
+  _narrowFactor() {
+    const a = this.camera.aspect;
+    if (!(a > 0) || a >= CONF.camNarrowAspect) return 1;
+    const t = Math.min(1, (CONF.camNarrowAspect - a) / (CONF.camNarrowAspect - CONF.camNarrowFull));
+    return 1 + (CONF.camNarrowDistGain - 1) * t;
+  }
+
   update(dt) {
     this.time += dt;
     const eco = this.eco;
 
     // --- カメラ：±8°/120秒の緩やかな周回（§5） ---
     const ang = Math.sin((this.time / CONF.camPeriodSec) * Math.PI * 2) * (CONF.camSwingDeg * Math.PI / 180);
+    const dist = CONF.camDistance * this._narrowFactor();
     this.camera.position.set(
-      Math.sin(ang) * CONF.camDistance,
+      Math.sin(ang) * dist,
       CONF.camHeight,
-      Math.cos(ang) * CONF.camDistance
+      Math.cos(ang) * dist
     );
     this.camera.lookAt(this.target);
 
     // --- ピント面：47秒周期で前後（§5） ---
     const f = (Math.sin((this.time / CONF.focusPeriodSec) * Math.PI * 2) + 1) * 0.5;
-    this.lightMat.uniforms.uFocus.value = CONF.focusNear + (CONF.focusFar - CONF.focusNear) * f;
+    // ピント面も同じ尺度で動かす（resize の uRefDist / uFogDensity と対）
+    const fk = this._narrowFactor();
+    this.lightMat.uniforms.uFocus.value = (CONF.focusNear + (CONF.focusFar - CONF.focusNear) * f) * fk;
 
     this.moteMat.uniforms.uTime.value = this.time;
     this.flowerMat.uniforms.uTime.value = this.time;
