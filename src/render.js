@@ -120,7 +120,15 @@ const CONF = {
   // 42.0 は接写の実測（芯の半径比 8%）から決めた値。比は falloff.js が持つので、
   // ここは裾の広さだけを決める。器に光が集まって裾が重なるようになったぶん、
   // 輝度70以上の面積が上限 10% に触れたので少し縮める
-  lightSize: 38.5,
+  //
+  // 【段8（2026-08-16）38.5 → 12.0】§11.19。「光を粉っぽい粒子にしたい」への対応。
+  // 参照画像（work/moodboard-powder.png）と実装を同じ物差しで測って分かったのは、
+  // **粒そのものは既に分裂していて、裾が互いに溶けて1つの塊になっている**こと
+  // （1成分あたりの極大: 参照 1.20 に対し実装 3.04）。足りないのは粒の数ではなく
+  // **粒の間の暗い隙間**なので、裾の形（falloff.js のローレンツ型＝実測どおり）は触らず、
+  // 裾の広さ＝ここだけを縮めた。段7 でカメラを 48 → 24 に寄せた（`refDist` は 48 のまま）ので、
+  // 画面上の実効の大きさは指定値の2倍になる点に注意。
+  lightSize: 12.0,
   lightWarmBoost: 1.30,  // 暖色は少しだけ大きく。明るさは「芯が密に重なること」で作る
   /**
    * 1粒あたりの明るさ。1.0 だと芯が白飛びする。
@@ -223,6 +231,28 @@ const CONF = {
   flowerAlpha: 0.42,        // 膜そのものの不透明度。上げると光を遮って暗くなる
   flowerBodyLit: 0.16,      // 光が無くても見える最低限の明るさ（形の輪郭）
   flowerGlowGain: 0.30,     // 光粒 1 個が膜を照らす強さ
+
+  /**
+   * 段9（2026-08-16）「花は周囲の光を吸収して花自身が光る」（§11.20）。
+   *
+   * 【何が問題だったか】
+   * 蓄えた光を**器の内側に暖色の点として描き直していた**ので、吸収の瞬間に
+   * 「寒色の粒が1つ消えて、暖色の粒が1つ現れる」だけになり、**花の周りの粒の数が減らない**。
+   * 吸収そのものは `ecosystem.js` の `_updateFlowers()` が実際にやっている
+   * （半径内の最も近い漂う光を `_removeDrift()` する）のに、描画がそれを隠していた。
+   *
+   * 【何を変えたか】
+   * 蓄えを常時の点として描くのをやめ、**膜の散乱（vLit）だけで表す**。
+   * ただし完全に連続量にすると保存則が溶けるので、**吸収した直後だけ短命の粒**を口元に出す。
+   *
+   * 散乱を暖色寄りに寄せるのは、それが「吸った光で光っている」ことの色になるから。
+   * 副作用として §11.11 の暖色%（＝輝度80以上のうち金色の割合）の**分母が暖色になり**、
+   * 段8 で粒を細かくする余地ができる（参照画像 moodboard-powder.png の暖色% は 58.27%）。
+   */
+  flowerScatWarmHold: 0.34,  // 器の根元からこの割合までは完全に暖色（0 で従来どおり）
+  flowerScatWarmSlope: 2.1,  // そこから外へ寒色へ変わる速さ（従来は 1.4）
+  flowerSparkLife: 1.10,     // 吸収直後の粒が見えている秒数
+  flowerSparkRise: 0.55,     // その粒が口元から器の中へ落ちていく距離（花の長さに対する比）
   flowerLightFalloff: 2.6,  // 光粒からの距離の効き。大きいほど照らす範囲が狭い
 
   /* --- 揺らぎ（植物ではなくクラゲの膜） --- */
@@ -386,6 +416,8 @@ function makePetalMaterial(slots, capacity) {
       uVeinGain: { value: CONF.flowerVeinGain },
       uVeinScat: { value: CONF.flowerVeinScat },
       uMembraneBase: { value: CONF.flowerMembraneBase },
+      uScatWarmHold: { value: CONF.flowerScatWarmHold },
+      uScatWarmSlope: { value: CONF.flowerScatWarmSlope },
     },
     vertexShader: /* glsl */ `
       attribute float aU;
@@ -468,6 +500,8 @@ function makePetalMaterial(slots, capacity) {
       uniform float uVeinGain;
       uniform float uVeinScat;
       uniform float uMembraneBase;
+      uniform float uScatWarmHold;
+      uniform float uScatWarmSlope;
       varying float vU;
       varying float vV;
       varying float vCharge;
@@ -538,7 +572,12 @@ function makePetalMaterial(slots, capacity) {
         // 掛けないと葉脈は見えない ―― 明るい所は body ではなく scat が作っているため
         // （膜の a だけを変えた最初の実装は、実測で本数 0.2 本のまま動かなかった）。
         // 平均0なので散乱の総量は変わらず、§11.3 の予算には効かない。
-        vec3 scat = mix(uGlowWarm, uGlowCool, clamp(vU * 1.4, 0.0, 1.0)) * glow * aBase
+        // 【段9】器の根元側を「完全に暖色」で保つ（§11.20）。
+        // 従来は clamp(vU * 1.4) だったので根元でも既に寒色が混ざり始めていて、
+        // 花の一番明るい所が青白かった。**吸った光で光っている**なら、その色は金であるべき。
+        // uScatWarmHold = 0 / uScatWarmSlope = 1.4 で従来と同じ式に戻る。
+        float warmT = clamp((vU - uScatWarmHold) * uScatWarmSlope, 0.0, 1.0);
+        vec3 scat = mix(uGlowWarm, uGlowCool, warmT) * glow * aBase
                   * (1.0 + uVeinScat * veinMod);
 
         // 霧。遠い花は水に溶ける
@@ -1293,34 +1332,41 @@ export class Renderer {
       n++;
     }
 
-    // 花の蓄え（暖色）。**器の内側に浮かべる。**
+    // 花の蓄え（暖色）。**段9 で「常時の点」をやめた（§11.20）。**
     //
-    // 以前は椀の底から放射状に伸びる「糸」の先に載せていたが、
-    // 器そのものを作った今は、その内側の空間に散らすほうが素直で、
-    // 「花の内部に光が漂っている」がそのまま絵になる。
-    // 中心ほど密にするため半径に指数を掛ける（均等に置くと輪に見える）。
+    // 以前は蓄えの数だけ器の内側に点を浮かべていた。器の絵としては素直だったが、
+    // **吸収したことが画面から読めない**という副作用があった:
+    // 吸収の瞬間に「寒色の粒が1つ消えて、暖色の粒が1つ現れる」だけなので、
+    // 花の近くの粒の総数が減らず、「吸われた」ではなく「色が変わった」に見えていた。
+    // 蓄えは膜の散乱（vLit）が表しているので、点は要らない。
+    //
+    // ただし完全に連続量にすると保存則が溶ける。**吸収した直後だけ**、口元に
+    // 短命の粒を1つ出して器の中へ沈ませる ―― 「いま1つ入った」が見える最小限。
     const flowers = eco._flowers;
-    const slots = this._slots;
     const t = this.time;
+    const spark = this._sparkT || (this._sparkT = new Float32Array(eco.params.flowerMax).fill(-99));
+    const prevC = this._prevCharge || (this._prevCharge = new Int16Array(eco.params.flowerMax).fill(-1));
     for (let i = 0; i < eco.flowerCount; i++) {
       const f = flowers[i];
-      // 花弁と同じ個体差・同じ回転を使う。**膜の照明もこの表を見ている**ので、
-      // ここを別に計算すると「光っている場所」と「粒の場所」がずれる
+      // 蓄えが増えた瞬間を捕まえる。減った時（魚が受け取った時）は何も出さない
+      if (prevC[i] >= 0 && f.charge > prevC[i]) spark[i] = t;
+      prevC[i] = f.charge;
+
+      const age = t - spark[i];
+      if (age < 0 || age >= CONF.flowerSparkLife || n >= this.lightN) continue;
+      const u = age / CONF.flowerSparkLife;
+      // 花弁と同じ個体差・同じ回転を使う（ここを別に計算すると器と粒がずれる）
       const ft = flowerTransform(f, _ft);
-      flowerQuaternion(ft, this._q);
-      for (let k = 0; k < f.charge && n < this.lightN; k++) {
-        const d = n * 3, sb = k * 3;
-        // ゆっくりした漂い。器の中で息をしているように見せる
-        const bob = Math.sin(t * 0.55 + k * 1.7 + f.x * 0.3) * CONF.flowerLightBob;
-        this._v3.set(slots[sb], slots[sb + 1] + bob, slots[sb + 2]);
-        this._v3.applyQuaternion(this._q).multiplyScalar(ft.scale);
-        pos[d] = f.x + this._v3.x;
-        pos[d + 1] = ft.baseY + this._v3.y;
-        pos[d + 2] = f.z + this._v3.z;
-        warm[n] = 1;
-        scale[n] = CONF.lightWarmBoost;
-        n++;
-      }
+      const d = n * 3;
+      pos[d] = f.x;
+      // 口元から器の中へ、減速しながら落ちる
+      pos[d + 1] = ft.baseY + (eco.params.flowerMouthY - CONF.flowerSparkRise
+        * CONF.flowerLength * (1 - (1 - u) * (1 - u))) * ft.scale;
+      pos[d + 2] = f.z;
+      warm[n] = 1;
+      // 消えぎわは小さくなる（唐突に消えると点滅に見える）
+      scale[n] = CONF.lightWarmBoost * (1 - u * u);
+      n++;
     }
 
     // 魚の積載（暖色）
