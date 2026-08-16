@@ -12,6 +12,7 @@
 
 import * as THREE from '../vendor/three.module.min.js';
 import { glowFalloff, MEASURED_CORE } from './falloff.js';
+import { PETAL, petalSample } from './petal.js';
 
 // 色を素通しにする（入力の sRGB→リニア変換も、出力のリニア→sRGB 変換もしない）。
 //
@@ -236,13 +237,14 @@ const CONF = {
    * しかも `|vV|` の鏡映で花弁の中心線に鋭い折り目ができる。これが山形模様の正体。
    * 新式は位相を `vV`（花弁を横切る座標）で決めるので、等位線は根元から先へ走る繊維になる。
    */
-  flowerVeinCount: 24,       // 花弁1枚あたりの**親繊維の本数**（周期数ではない）
-  flowerVeinWidth: 0.035,   // 繊維の太さ（vV 単位。花弁の幅の半分が 1.0）
-  flowerVeinJitter: 0.55,   // 繊維の位置の不揃い（隣との間隔に対する比）。0 で等間隔
-  flowerVeinBranch: 0.90,   // 子繊維（枝）の強さ。0 で枝が出ない
+  // 葉脈の定数（本数・太さ・不揃いさ・枝）は **src/petal.js の PETAL が正本**。
+  // 段12 でテクスチャに焼いたので、断片シェーダ側には残っていない。
   flowerVeinGain: 0.55,     // 膜そのものの濃淡への効き
-  flowerVeinEmit: 0.55,     // **発光として散乱に足す強さ（段10 で平均0をやめた。段11 で予算内へ）**
-  flowerVeinFill: 0.18,     // 繊維が膜を覆う平均的な割合。遠景で「束」に畳むときの値
+  flowerVeinEmit: 0.38,     // 発光として散乱に足す強さ（段10で平均0をやめ、段11・段12で予算内へ）
+  flowerVeinFill: 0.18,     // 葉脈が膜を覆う平均的な割合（膜の不透明度を変えないための基準）
+  flowerRimGain: 0.90,      // 縁の光の強さ（蓄えた光に比例する＝花は自分で光らない）
+  flowerRimBody: 0.20,      // 光が無いときにも残る輪郭のぶん
+  petalTexSize: 512,        // 花弁テクスチャの一辺。手前の花は画面上 1000px 前後になる
   flowerMembraneBase: 0.72, // 膜の下地。葉脈を足したぶんの明るさはここで戻す
 
   flowerAlpha: 0.42,        // 膜そのものの不透明度。上げると光を遮って暗くなる
@@ -401,6 +403,47 @@ function makeFlowerSlots(n) {
 }
 
 /**
+ * 花弁のテクスチャを canvas に焼く。R=膜の形 / G=葉脈 / B=縁の光。
+ *
+ * **形をシェーダの包絡の掛け算で作るのをやめた（段12・§11.23）。**
+ * 滑らかな関数の積には「端」が無く、定数をどう選んでも輪郭が出ないことが分かったため
+ * （リムを4通り試して全部失敗し、`side` を3倍・`tip` を4倍急にしても画面の縁の幅が動かなかった）。
+ * 魚のシルエットを ShapeGeometry から canvas テクスチャに変えて直したのと同じ手（§8.3）。
+ *
+ * **ミップマップは有効にする。** 遠くの花では細い繊維が平均されて「束」に畳まれてほしい
+ * ―― 段10 で手で書いた LOD をミップマップが肩代わりする。
+ * （光の粒のテクスチャはミップを切っている。あちらは芯が半径の8%しかなく、
+ *   平均されると芯そのものが消えるため。目的が逆なので設定も逆になる）
+ */
+function makePetalTexture(size) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  for (let j = 0; j < size; j++) {
+    const u = j / (size - 1);
+    for (let i = 0; i < size; i++) {
+      const v = (i / (size - 1)) * 2 - 1;
+      const t = petalSample(u, v);
+      const o = (j * size + i) * 4;
+      img.data[o] = Math.round(t.shape * 255);
+      img.data[o + 1] = Math.round(t.vein * 255);
+      img.data[o + 2] = Math.round(t.rim * 255);
+      img.data[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+
+/**
  * 花びら（膜）のマテリアル。
  *
  * **加算合成をやめた。** 加算は「花びら自身が光っている」ことにしかならず、
@@ -416,7 +459,7 @@ function makeFlowerSlots(n) {
  */
 function makePetalMaterial(slots, capacity) {
   return new THREE.ShaderMaterial({
-    defines: { CAPACITY: capacity, VEINS: CONF.flowerVeinCount },
+    defines: { CAPACITY: capacity },
     transparent: true,
     depthWrite: false,
     side: THREE.DoubleSide,
@@ -436,13 +479,14 @@ function makePetalMaterial(slots, capacity) {
       uSwaySpeed: { value: CONF.flowerSwaySpeed },
       uFogColor: { value: new THREE.Color(PALETTE.bgTop) },
       uFogDensity: { value: CONF.fogDensity },
-      uVeinBranch: { value: CONF.flowerVeinBranch },
-      uVeinJitter: { value: CONF.flowerVeinJitter },
       uVeinEmit: { value: CONF.flowerVeinEmit },
       uVeinFill: { value: CONF.flowerVeinFill },
       uVeinWidth: { value: CONF.flowerVeinWidth },
       uVeinGain: { value: CONF.flowerVeinGain },
       uMembraneBase: { value: CONF.flowerMembraneBase },
+      uPetal: { value: makePetalTexture(CONF.petalTexSize) },
+      uRimGain: { value: CONF.flowerRimGain },
+      uRimBody: { value: CONF.flowerRimBody },
       uScatWarmHold: { value: CONF.flowerScatWarmHold },
       uScatWarmSlope: { value: CONF.flowerScatWarmSlope },
     },
@@ -527,13 +571,14 @@ function makePetalMaterial(slots, capacity) {
       uniform float uGlowGain;
       uniform vec3 uFogColor;
       uniform float uFogDensity;
-      uniform float uVeinBranch;
-      uniform float uVeinJitter;
       uniform float uVeinEmit;
       uniform float uVeinFill;
       uniform float uVeinWidth;
       uniform float uVeinGain;
       uniform float uMembraneBase;
+      uniform sampler2D uPetal;
+      uniform float uRimGain;
+      uniform float uRimBody;
       uniform float uScatWarmHold;
       uniform float uScatWarmSlope;
       varying float vU;
@@ -552,83 +597,31 @@ function makePetalMaterial(slots, capacity) {
         // （実際に一度そうなった。ガラスの破片のような直線が何本も出た）。
         // 中心線でだけ最大になり、面の端では必ず 0 になる連続な関数を掛け合わせる。
         float edge = 1.0 - abs(vV);
-        float side = pow(smoothstep(0.0, 1.0, edge), 1.25);
-        float tip  = smoothstep(1.0, 0.30, vU);       // 先は丸く消える
-        float root = smoothstep(0.0, 0.34, vU);       // 根元も落として器の底を空ける
         // 面を真横から見ている所は溶かす。
         // ここを入れないと、器の下側のようにほぼ真横を向く面でシルエットが
         // 幅 0 の直線として立ち、「硬い板」に見える。
         float face = smoothstep(0.0, 0.34, vNdv);
 
+        // 花弁の形・葉脈・縁の光は**テクスチャから読む**（段12・§11.23）。
+        // 花弁ごとに左右を反転し、わずかに歪めて変化を出す
+        // （1枚のテクスチャを 7枚 × 13輪 にそのまま貼ると全部同じ模様になる）。
+        float tx = vV * 0.5 + 0.5;
+        tx = mix(tx, 1.0 - tx, step(0.5, fract(vSeed * 0.37)));
+        tx += 0.015 * sin(vU * 7.0 + vSeed * 3.1);
+        vec3 pt = texture2D(uPetal, vec2(clamp(tx, 0.002, 0.998), clamp(vU, 0.002, 0.998))).rgb;
+
         // 膜の厚み。散乱はこちらに比例させる（稜を掛けない）
-        float aBase = uAlpha * side * tip * root * face;
+        float aBase = uAlpha * pt.r * face;
         // 花びらの中心線に柔らかい稜を入れる。これが無いと 7 枚が溶け合って
         // 「器」ではなく「霞」に見える。線ではなく指数の山なので輪郭は立たない。
         // **稜は膜の見た目だけに効かせる。** 散乱にも掛けると中心線だけが明るくなり、
         // 遠目に放射状の光条（レンズフレア）に見える（§12 で一度却下した見え方）
         float vein = exp(-abs(vV) * 3.2);
 
-        // --- 葉脈（段4 で入れ、段10 で作り直した）§11.21 ---
-        //
-        // **周期場をやめ、個体を持った繊維の距離場にした。**
-        // fract で無限に並べる作りは、どう歪めても**膜の全面が模様で埋まる**。
-        // 参照画像（work/moodboard-flower-bowl.png / -side.png）の葉脈は
-        // 「根元から立ち上がり、Y 字に割れ、途中で終わる個別の繊維」で、
-        // 繊維と繊維の間には**何も無い滑らかな膜**が残っている。作っていたものが別物だった。
-        //
-        // 繊維は VEINS 本（花弁1枚あたり）。位置・太さ・終端・分岐点・分岐の向きを
-        // 種から作る（乱数ではなく決まった式なので毎回同じ形になる）。
-        // 固定回数のループなのでプリミティブも塗り面積も増えない。増えるのは ALU だけ。
-        // ※ ここは JS のテンプレートリテラルの中なので、コメントにバッククォートを書かない。
-        float line = 0.0;
-        for (int i = 0; i < VEINS; i++) {
-          float sd = vSeed + float(i) * 17.3;
-          float r1 = fract(sin(sd * 12.9898) * 43758.5453);   // 位置のずれ
-          float r2 = fract(sin(sd * 78.2330) * 43758.5453);   // 終端
-          float r3 = fract(sin(sd * 39.4250) * 43758.5453);   // 太さ
-          float r4 = fract(sin(sd * 91.1170) * 43758.5453);   // 分岐点
-          float r5 = fract(sin(sd * 53.9110) * 43758.5453);   // 分岐の向き
-
-          // 根元で収束し、先へ行くほど花弁の幅いっぱいに広がる（参照と同じ扇形）
-          float target = ((float(i) + 0.5) / float(VEINS)) * 2.0 - 1.0;
-          target += (r1 - 0.5) * uVeinJitter * (2.0 / float(VEINS));
-          float cv = target * pow(vU, 0.65);
-          // 根元では間隔も狭いので、太さも一緒に細くする（狭い所で潰れて繋がらないように）
-          float wd = uVeinWidth * (0.35 + 0.65 * pow(vU, 0.65)) * (0.75 + 0.5 * r3);
-
-          // **途中で終わる。** 端は必ず 0 に落として輪郭を立てない（§11.8 の考え方は残す）
-          float eU = 0.62 + 0.38 * r2;
-          float env = smoothstep(0.03, 0.20, vU) * smoothstep(eU, eU - 0.28, vU);
-          float d = (vV - cv) / wd;
-          line = max(line, exp(-d * d) * env);
-
-          // 子繊維（枝）。親の途中から片側へ分かれ、短く終わる。
-          // 旧実装の「倍の本数の線を重ねる」は親と平行なので**画像の上で Y 字に繋がらず**、
-          // 傾きを 0〜12 まで振っても横切る成分が動かなかった（実測 9.0/8.8/8.8/8.9%）。
-          float sp = 0.30 + 0.35 * r4;
-          float dir = r5 < 0.5 ? -1.0 : 1.0;
-          float cc = cv + dir * max(vU - sp, 0.0) * 0.55;
-          float cE = sp + 0.25 + 0.30 * r3;
-          float cEnv = smoothstep(sp, sp + 0.10, vU) * smoothstep(cE, cE - 0.18, vU);
-          float dc = (vV - cc) / (wd * 0.70);
-          line = max(line, exp(-dc * dc) * cEnv * uVeinBranch);
-        }
-
-        // 【§11.8 を「消す」から「束に畳む」へ】
-        // 旧: 1画素に周期が詰まったら lodV を掛けて**消していた**。
-        // ところが繊維は根元で収束するので、**参照で最も密で明るい根元を消しにかかっていた**。
-        // 消す代わりに平均値（uVeinFill）へ寄せる ＝ 細線が「束の面発光」に見える。
-        // モアレ対策という目的は同じで、遠景・小さい花では個別の線が出なくなる。
-        float rpx = fwidth(vV) * float(VEINS) * 0.5;
-        line = mix(line, uVeinFill, smoothstep(0.25, 0.60, rpx));
-
-        // 端では必ず 0 に落として輪郭を立てない（膜の縁と同じ考え方）。
-        // **指数は 1.2 → 0.6 に緩めた（段10）。** 1.2 だと花弁の縁で繊維が早く消え、
-        // 7枚の花弁の境目が暗い楔になって、円弧で数えたとき本数が 22 本（参照 50〜70）
-        // ・空白率 80%（参照 50%）に落ちていた。
-        float venv = smoothstep(0.02, 0.20, vU) * pow(1.0 - abs(vV), 0.6);
-        // 膜の濃淡は平均を引いた変調のまま（膜全体の不透明度を変えないため）
-        float veinMod = (line - uVeinFill) * venv;
+        // 葉脈と縁の光はテクスチャの G / B（段12）。
+        // 段10 の「繊維24本の距離場」は src/petal.js に移り、断片ごとのループは消えた
+        // （check-overdraw.mjs が測れない ALU がそのぶん返る）。
+        float veinMod = pt.g - uVeinFill;
 
         float a = aBase * (uMembraneBase + 0.50 * vein + uVeinGain * veinMod);
 
@@ -637,7 +630,7 @@ function makePetalMaterial(slots, capacity) {
         float glow = vLit * uGlowGain;
 
         // 膜そのものの色（発光ではない。形が辛うじて見える最低限）
-        vec3 body = uTint * (uBodyLit + 0.22 * edge);
+        vec3 body = uTint * (uBodyLit + 0.22 * edge + uRimBody * pt.b);
         // 散乱。中心は暖色寄り、外へ行くほど寒色へ。
         // **膜のある所でしか散らない**ので a を掛ける。掛けないと、膜が透明な
         // 場所にまで光が足されて、器の中心が白い塊に潰れる。
@@ -660,7 +653,9 @@ function makePetalMaterial(slots, capacity) {
         // **外して安全なのは、白飛び(≤0.1%)・暖色%(≥10)・輝度別の面積を
         // check-viewports.mjs が毎回見ているから**（門が無い状態で外してはいけない）。
         vec3 scat = mix(uGlowWarm, uGlowCool, warmT) * glow * aBase
-                  + uGlowWarm * glow * aBase * line * venv * uVeinEmit;
+                  + uGlowWarm * glow * aBase * pt.g * uVeinEmit
+                  // 縁の光。**aBase を掛けない**（縁では膜の不透明度が落ちるため）
+                  + uGlowCool * glow * pt.b * uRimGain;
 
         // 霧。遠い花は水に溶ける
         float fog = 1.0 - exp(-uFogDensity * uFogDensity * vDepth * vDepth);
